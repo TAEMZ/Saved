@@ -1,0 +1,9 @@
+# Python caches
+__pycache__/
+*.pyc
+
+# Local secrets & database (DO NOT PUSH TO GITHUB)
+config.json
+saved_messages.db
+secret.key
+.env

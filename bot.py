@@ -1,0 +1,930 @@
+import sys
+# Configure UTF-8 encoding for standard output/error to prevent UnicodeEncodeError on Windows
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except AttributeError:
+    pass
+
+import re
+import os
+import glob
+import asyncio
+from datetime import datetime, timedelta
+import pytz
+import dateparser
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, PasswordHashInvalidError, PhoneCodeExpiredError
+
+import database
+import config
+import encryption
+
+# Initialize database schema
+database.init_db()
+
+# Global dictionary to keep Telethon client connections alive during the verification code flow.
+# This prevents code expiration caused by disconnecting/reconnecting before authentication is complete.
+active_clients = {}
+
+# --- Helper Functions ---
+
+def get_tomorrow_morning_in_utc(user_timezone_str):
+    """Calculates tomorrow at 9:00 AM in the user's timezone, returned as a naive UTC datetime."""
+    try:
+        user_tz = pytz.timezone(user_timezone_str)
+    except Exception:
+        try:
+            if user_timezone_str.startswith("+") or user_timezone_str.startswith("-"):
+                offset = int(user_timezone_str)
+                user_tz = pytz.FixedOffset(offset * 60)
+            else:
+                user_tz = pytz.utc
+        except Exception:
+            user_tz = pytz.utc
+            
+    now_local = datetime.now(user_tz)
+    tomorrow_local = (now_local + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+    tomorrow_utc = tomorrow_local.astimezone(pytz.utc)
+    return tomorrow_utc.replace(tzinfo=None)
+
+def parse_relative_time_for_user(text, user_timezone_str):
+    """Parses a time string relative to the user's timezone and converts it to a naive UTC datetime."""
+    try:
+        user_tz = pytz.timezone(user_timezone_str)
+    except Exception:
+        try:
+            if user_timezone_str.startswith("+") or user_timezone_str.startswith("-"):
+                offset = int(user_timezone_str)
+                user_tz = pytz.FixedOffset(offset * 60)
+            else:
+                user_tz = pytz.utc
+        except Exception:
+            user_tz = pytz.utc
+            
+    now_local = datetime.now(user_tz)
+    
+    text_lower = text.lower().strip()
+    if text_lower in ["1h", "1 hour", "in 1 hour", "in 1h"]:
+        return datetime.utcnow() + timedelta(hours=1)
+    if text_lower in ["3h", "3 hours", "in 3 hours", "in 3h"]:
+        return datetime.utcnow() + timedelta(hours=3)
+    if text_lower == "tonight":
+        tonight_local = now_local.replace(hour=20, minute=0, second=0, microsecond=0)
+        if tonight_local <= now_local:
+            tonight_local += timedelta(days=1)
+        return tonight_local.astimezone(pytz.utc).replace(tzinfo=None)
+    if text_lower == "tomorrow":
+        tomorrow_local = now_local.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        return tomorrow_local.astimezone(pytz.utc).replace(tzinfo=None)
+
+    parsed = dateparser.parse(
+        text,
+        settings={
+            'PREFER_DATES_FROM': 'future',
+            'RELATIVE_BASE': now_local.replace(tzinfo=None),
+            'TIMEZONE': user_timezone_str,
+            'TO_TIMEZONE': 'UTC'
+        }
+    )
+    if parsed:
+        return parsed.replace(tzinfo=None)
+    return None
+
+def make_card_markup(db_id, has_reminder=False):
+    """Generates the inline keyboard for a saved message card."""
+    keyboard = [
+        [
+            InlineKeyboardButton("🕒 1 Hour", callback_data=f"rem:1h:{db_id}"),
+            InlineKeyboardButton("🕒 3 Hours", callback_data=f"rem:3h:{db_id}"),
+            InlineKeyboardButton("🕒 Tomorrow", callback_data=f"rem:tom:{db_id}"),
+        ],
+        [
+            InlineKeyboardButton("✍️ Custom Time", callback_data=f"rem:cust:{db_id}"),
+            InlineKeyboardButton("🏷️ Add Tag", callback_data=f"tag:add:{db_id}"),
+        ],
+        [
+            InlineKeyboardButton("📁 Archive", callback_data=f"arc:{db_id}")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_card_content(db_id, user_timezone_str="UTC"):
+    """Fetches details for a message ID and formats the status text and keyboard markup."""
+    msg = database.get_message_details(db_id)
+    if not msg:
+        return "⚠️ Saved message not found.", None
+        
+    tags = database.get_message_tags(db_id)
+    tags_str = " ".join([f"#{t}" for t in tags]) if tags else "None"
+    
+    reminder_str = "Not set"
+    if msg['reminder_time']:
+        try:
+            dt_utc = datetime.fromisoformat(msg['reminder_time']).replace(tzinfo=pytz.utc)
+            try:
+                user_tz = pytz.timezone(user_timezone_str)
+            except Exception:
+                try:
+                    if user_timezone_str.startswith("+") or user_timezone_str.startswith("-"):
+                        offset = int(user_timezone_str)
+                        user_tz = pytz.FixedOffset(offset * 60)
+                    else:
+                        user_tz = pytz.utc
+                except Exception:
+                    user_tz = pytz.utc
+            
+            dt_local = dt_utc.astimezone(user_tz)
+            reminder_str = dt_local.strftime("%b %d, %I:%M %p") + f" ({user_timezone_str})"
+        except Exception as e:
+            print(f"Error formatting reminder time: {e}")
+            reminder_str = msg['reminder_time']
+            
+    content = msg['text'] or ""
+    if msg['media_type'] != 'text':
+        content_prefix = f"[{msg['media_type'].capitalize()}]"
+        content = f"{content_prefix} {content}".strip()
+        
+    if len(content) > 300:
+        content = content[:297] + "..."
+        
+    text = (
+        f"📥 **Message Saved!**\n\n"
+        f"📝 **Content:** {content}\n"
+        f"🏷️ **Tags:** {tags_str}\n"
+        f"⏰ **Reminder:** {reminder_str}\n"
+    )
+    
+    markup = make_card_markup(db_id, has_reminder=bool(msg['reminder_time']))
+    return text, markup
+
+async def send_reminder_message(bot, msg):
+    """Sends the actual reminder back to the user."""
+    chat_id = msg['chat_id']
+    db_id = msg['id']
+    
+    # 1. Send introductory alert
+    banner = f"🔔 **REMINDER!** You asked to remember this item:"
+    await bot.send_message(chat_id=chat_id, text=banner, parse_mode="Markdown")
+    
+    # 2. Re-send/copy the original message if we have the telegram message ID
+    sent_msg = None
+    if msg['telegram_message_id']:
+        try:
+            sent_msg = await bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=chat_id,
+                message_id=msg['telegram_message_id']
+            )
+        except Exception as e:
+            print(f"Failed to copy original message {msg['telegram_message_id']}: {e}")
+            
+    if not sent_msg:
+        # Fallback to standard text message if copy fails or telegram_message_id is missing (common for synced history)
+        text = msg['text'] or "(No text content)"
+        if msg['media_type'] != 'text':
+            text = f"[{msg['media_type'].capitalize()}] {text}"
+        sent_msg = await bot.send_message(chat_id=chat_id, text=text)
+        
+    # 3. Send controls under the reminder
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Done (Archive)", callback_data=f"arc:{db_id}"),
+        ],
+        [
+            InlineKeyboardButton("⏰ Snooze 1 Hour", callback_data=f"snz:1h:{db_id}"),
+            InlineKeyboardButton("⏰ Snooze Tomorrow", callback_data=f"snz:tom:{db_id}"),
+        ]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Choose an action for this item:",
+        reply_markup=markup
+    )
+
+async def check_and_send_due_reminders(bot):
+    """Polls database for due reminders, sends them, and updates status."""
+    due_items = database.get_due_reminders()
+    count = 0
+    for item in due_items:
+        try:
+            await send_reminder_message(bot, item)
+            database.mark_as_reminded(item['id'])
+            count += 1
+        except Exception as e:
+            print(f"Error sending reminder ID {item['id']}: {e}")
+    return count
+
+def clean_session_files(chat_id):
+    """Safely cleans up any Telethon session files for privacy."""
+    for filename in glob.glob(f"session_{chat_id}.session*"):
+        try:
+            os.remove(filename)
+        except Exception as e:
+            print(f"Error deleting session file {filename}: {e}")
+
+# --- Command Handlers ---
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Greets the user and displays instructions."""
+    text = (
+        "👋 **Welcome to the Saved Messages Organizer Bot!**\n\n"
+        "I'll help you organize and set reminders for messages, articles, links, or files so you never forget them.\n\n"
+        "🚀 **How to use:**\n"
+        "1. **Forward** any message, link, image, or text to this chat. I will encrypt it securely so no one else can read it!\n"
+        "2. Choose a **reminder time** and add **tags** using the buttons.\n"
+        "3. When the time comes, I'll send the message back to you!\n\n"
+        "📥 **Sync Your Official History:**\n"
+        "• Type `/sync` to temporarily connect your account and import your existing Telegram **Saved Messages** history.\n\n"
+        "⚙️ **Commands:**\n"
+        "• /list — View your active saved messages\n"
+        "• /tags — View all active tags and filter by them\n"
+        "• /search <query> — Search messages and tags\n"
+        "• /timezone <name> — Set your timezone (e.g. `/timezone Europe/Paris`)\n"
+        "• /help — Show this help text again"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays user manual."""
+    await start_command(update, context)
+
+async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sets user's local timezone for reminder time parsing."""
+    chat_id = update.effective_chat.id
+    if not context.args:
+        current_tz = database.get_user_timezone(chat_id)
+        await update.message.reply_text(
+            f"ℹ️ Your current timezone is set to: `{current_tz}`\n\n"
+            f"To change it, specify a timezone name or offset, e.g.:\n"
+            f"• `/timezone Europe/Paris`\n"
+            f"• `/timezone America/New_York`\n"
+            f"• `/timezone +3` (for GMT+3)\n"
+            f"• `/timezone -5` (for GMT-5)",
+            parse_mode="Markdown"
+        )
+        return
+        
+    tz_input = context.args[0].strip()
+    
+    valid = False
+    if tz_input.startswith("+") or tz_input.startswith("-"):
+        try:
+            offset = int(tz_input)
+            if -12 <= offset <= 14:
+                valid = True
+        except ValueError:
+            pass
+    else:
+        try:
+            pytz.timezone(tz_input)
+            valid = True
+        except pytz.UnknownTimeZoneError:
+            pass
+            
+    if not valid:
+        await update.message.reply_text(
+            "❌ Invalid timezone name or offset. Please use common zone names like `Europe/Paris`, "
+            "`America/Los_Angeles`, or numerical offsets like `+3` or `-5`."
+        )
+        return
+        
+    database.set_user_timezone(chat_id, tz_input)
+    await update.message.reply_text(f"✅ Your timezone has been updated to: `{tz_input}`", parse_mode="Markdown")
+
+async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists unarchived saved items with links to view them."""
+    chat_id = update.effective_chat.id
+    messages = database.get_active_messages(chat_id)
+    if not messages:
+        await update.message.reply_text("📂 You have no active saved messages.")
+        return
+        
+    text = "📂 **Your Active Saved Messages:**\n\n"
+    for i, msg in enumerate(messages, 1):
+        snippet = msg['text'] or "(No text content)"
+        if len(snippet) > 50:
+            snippet = snippet[:47] + "..."
+        snippet = snippet.replace('\n', ' ')
+        
+        if msg['media_type'] != 'text':
+            snippet = f"[{msg['media_type'].capitalize()}] {snippet}".strip()
+            
+        tags = database.get_message_tags(msg['id'])
+        tag_str = " " + " ".join([f"#{t}" for t in tags]) if tags else ""
+        
+        text += f"{i}. {snippet}{tag_str}\n"
+        text += f"   🔍 View: /view_{msg['id']}  |  📁 Archive: /archive_{msg['id']}\n\n"
+        
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists all tags and provides commands to filter by them."""
+    chat_id = update.effective_chat.id
+    tags = database.get_all_tags(chat_id)
+    if not tags:
+        await update.message.reply_text("🏷️ You don't have any tags yet. Tag messages by clicking 'Add Tag' or including hashtags (e.g. #read) in your messages.")
+        return
+        
+    text = "🏷️ **Your Tags:**\n\n"
+    for tag in tags:
+        text += f"• #{tag} — Filter: /tag_{tag}\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Searches messages and tags."""
+    chat_id = update.effective_chat.id
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.message.reply_text("Usage: `/search <keyword or tag>`", parse_mode="Markdown")
+        return
+        
+    results = database.search_messages(chat_id, query)
+    if not results:
+        await update.message.reply_text(f"🔍 No messages found matching '{query}'.")
+        return
+        
+    text = f"🔍 **Search Results for '{query}':**\n\n"
+    for i, msg in enumerate(results, 1):
+        snippet = msg['text'] or "(No text content)"
+        if len(snippet) > 50:
+            snippet = snippet[:47] + "..."
+        snippet = snippet.replace('\n', ' ')
+        
+        if msg['media_type'] != 'text':
+            snippet = f"[{msg['media_type'].capitalize()}] {snippet}".strip()
+            
+        tags = database.get_message_tags(msg['id'])
+        tag_str = " " + " ".join([f"#{t}" for t in tags]) if tags else ""
+        
+        text += f"{i}. {snippet}{tag_str}\n"
+        text += f"   🔍 View: /view_{msg['id']}  |  📁 Archive: /archive_{msg['id']}\n\n"
+        
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+# --- On-Demand History Sync (/sync) Handlers ---
+
+async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Starts the history sync flow. Prompts user to share their contact card."""
+    chat_id = update.effective_chat.id
+    
+    # Check if developer keys are configured
+    if (not config.TELEGRAM_API_ID or config.TELEGRAM_API_ID == "YOUR_API_ID_HERE" or
+        not config.TELEGRAM_API_HASH or config.TELEGRAM_API_HASH == "YOUR_API_HASH_HERE"):
+        await update.message.reply_text(
+            "❌ **Sync Unavailable**\n"
+            "The bot developer has not configured the required global API Credentials (`api_id` / `api_hash`) on the server yet.",
+            parse_mode="Markdown"
+        )
+        return
+        
+    database.set_sync_state(chat_id, 'AWAITING_PHONE')
+    
+    # Native Telegram contact share button
+    keyboard = ReplyKeyboardMarkup(
+        [[KeyboardButton(text="📱 Share Phone Number", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    
+    await update.message.reply_text(
+        "📥 **Sync Official Saved Messages History**\n\n"
+        "To sync your history, we will temporarily log in to your account, download recent messages, and immediately log out.\n\n"
+        "Click the button below to **Share Phone Number** to begin. You can type `/cancel` at any time to abort.",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Aborts the sync flow and cleans up."""
+    chat_id = update.effective_chat.id
+    sync_state = database.get_sync_state(chat_id)
+    if sync_state:
+        database.clear_sync_state(chat_id)
+        clean_session_files(chat_id)
+        if chat_id in active_clients:
+            try:
+                await active_clients[chat_id].disconnect()
+            except Exception:
+                pass
+            active_clients.pop(chat_id, None)
+        await update.message.reply_text("❌ Sync aborted. All temporary session files have been securely wiped.", reply_markup=ReplyKeyboardRemove())
+    else:
+        await update.message.reply_text("There is no active sync process running.")
+
+# --- Message and Pattern Match Command Handlers ---
+
+async def view_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays detailed card for a single saved message."""
+    chat_id = update.effective_chat.id
+    match = re.match(r"^/view_(\d+)$", update.message.text)
+    if not match:
+        return
+        
+    db_id = int(match.group(1))
+    tz = database.get_user_timezone(chat_id)
+    text, markup = get_card_content(db_id, tz)
+    
+    if markup:
+        msg = database.get_message_details(db_id)
+        if msg and msg['telegram_message_id']:
+            try:
+                await context.bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=chat_id,
+                    message_id=msg['telegram_message_id']
+                )
+            except Exception:
+                pass
+        await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text)
+
+async def archive_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick archives a message from a command link."""
+    match = re.match(r"^/archive_(\d+)$", update.message.text)
+    if not match:
+        return
+    db_id = int(match.group(1))
+    database.mark_as_archived(db_id)
+    await update.message.reply_text(f"📁 Message ID {db_id} archived successfully.")
+
+async def tag_filter_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists saved messages matching the chosen tag."""
+    chat_id = update.effective_chat.id
+    match = re.match(r"^/tag_([a-zA-Z0-9_]+)$", update.message.text)
+    if not match:
+        return
+        
+    tag_name = match.group(1).lower()
+    messages = database.get_messages_by_tag(chat_id, tag_name)
+    if not messages:
+        await update.message.reply_text(f"🏷️ No active messages found with tag #{tag_name}.")
+        return
+        
+    text = f"🏷️ **Active messages with tag #{tag_name}:**\n\n"
+    for i, msg in enumerate(messages, 1):
+        snippet = msg['text'] or "(No text content)"
+        if len(snippet) > 50:
+            snippet = snippet[:47] + "..."
+        snippet = snippet.replace('\n', ' ')
+        
+        if msg['media_type'] != 'text':
+            snippet = f"[{msg['media_type'].capitalize()}] {snippet}".strip()
+            
+        text += f"{i}. {snippet}\n"
+        text += f"   🔍 View: /view_{msg['id']}  |  📁 Archive: /archive_{msg['id']}\n\n"
+        
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+# --- Message and Reply Parsing ---
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles shared phone contacts for the sync setup."""
+    chat_id = update.effective_chat.id
+    contact = update.message.contact
+    
+    # Verify user shared their own contact
+    if contact.user_id != chat_id:
+        await update.message.reply_text("❌ Please share your OWN contact number using the button.")
+        return
+        
+    sync_state = database.get_sync_state(chat_id)
+    if not sync_state or sync_state['state'] != 'AWAITING_PHONE':
+        await update.message.reply_text("To sync your account, please trigger the `/sync` command first.")
+        return
+        
+    phone = contact.phone_number
+    # Format phone cleanly
+    if not phone.startswith("+"):
+        phone = "+" + phone
+        
+    await update.message.reply_text(
+        "⏳ Connecting to Telegram API... requesting verification code...",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    
+    # Initialize Telethon Client with a fresh StringSession
+    api_id = int(config.TELEGRAM_API_ID)
+    api_hash = config.TELEGRAM_API_HASH
+
+    # Step 1: Try to send the code — if this fails, clear state and inform user
+    try:
+        # Disconnect any existing client connection for this user first
+        if chat_id in active_clients:
+            try:
+                await active_clients[chat_id].disconnect()
+            except Exception:
+                pass
+            active_clients.pop(chat_id, None)
+
+        client = TelegramClient(StringSession(), api_id, api_hash)
+        await client.connect()
+        sent_code = await client.send_code_request(phone)
+        # Store in active_clients to keep the connection alive
+        active_clients[chat_id] = client
+        # Save the session string so we can restore exact context later
+        session_str = client.session.save()
+        # Keep client connected (do not call client.disconnect())
+    except Exception as e:
+        print(f"Error in Telethon connection: {e}")
+        clean_session_files(chat_id)
+        database.clear_sync_state(chat_id)
+        await update.message.reply_text(
+            f"❌ **Connection Failed**\n"
+            f"Could not request code from Telegram. Details: `{str(e)}`",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Step 2: Code was sent successfully — save state AND session string BEFORE notifying user
+    database.set_sync_state(chat_id, 'AWAITING_CODE', phone, sent_code.phone_code_hash, session_str)
+
+    await update.message.reply_text(
+        "💬 **Verification Code Sent!**\n\n"
+        "Please check your Telegram app for a message from the official **Telegram** account.\n\n"
+        "⚠️ **IMPORTANT SECURITY WORKAROUND:**\n"
+        "Telegram immediately invalidates login codes if they are sent as-is to bots. "
+        "To bypass this security block, **please append any letter or symbol** to your code when you type it here.\n\n"
+        "👉 For example, if your code is `70863`, type **`70863.`** or **`70863_`** or **`70863x`**.\n\n"
+        "Type `/cancel` to abort sync.",
+        parse_mode="Markdown"
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processes incoming user text messages (saves new content or processes replies to ForceReply / Sync code)."""
+    chat_id = update.effective_chat.id
+    message = update.message
+    user_text = message.text.strip()
+    
+    # 1. Check if user is in an active sync setup flow
+    sync_state = database.get_sync_state(chat_id)
+    if sync_state:
+        state = sync_state['state']
+        phone = sync_state['phone']
+        code_hash = sync_state['phone_code_hash']
+
+        # If sync is active in ANY state, never save the message — guide user instead
+        if state == 'AWAITING_PHONE':
+            await message.reply_text(
+                "📱 You are in the middle of a sync setup.\n"
+                "Please tap the **Share Phone Number** button, or type /cancel to abort.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        if state in ['AWAITING_CODE', 'AWAITING_2FA']:
+            await message.reply_text("⏳ Processing authentication... please wait...")
+            
+            api_id = int(config.TELEGRAM_API_ID)
+            api_hash = config.TELEGRAM_API_HASH
+            
+            # Retrieve or recreate the client to preserve the session connection
+            client = active_clients.get(chat_id)
+            if not client:
+                session_str = sync_state.get('session_string') or ''
+                client = TelegramClient(StringSession(session_str), api_id, api_hash)
+                await client.connect()
+                active_clients[chat_id] = client
+            
+            try:
+                if not client.is_connected():
+                    await client.connect()
+                
+                if state == 'AWAITING_CODE':
+                    try:
+                        # Attempt sign-in with phone code
+                        # Extract only digits from the code to support obfuscation (e.g. user typing '12345.' or '12345_')
+                        clean_code = re.sub(r'\D', '', user_text)
+                        await client.sign_in(phone, clean_code, phone_code_hash=code_hash)
+                    except SessionPasswordNeededError:
+                        # 2FA password required — save updated session string
+                        updated_session = client.session.save()
+                        database.set_sync_state(chat_id, 'AWAITING_2FA', session_string=updated_session)
+                        # Keep it connected (do not disconnect)
+                        await message.reply_text(
+                            "🔒 **Two-Factor Authentication Active**\n\n"
+                            "Please enter your **Two-Factor password** below to complete authorization:",
+                            parse_mode="Markdown"
+                        )
+                        return
+                    except PhoneCodeInvalidError:
+                        # Keep it connected so user can retry typing
+                        await message.reply_text("❌ **Invalid verification code.** Please type the code again:")
+                        return
+                    except PhoneCodeExpiredError:
+                        await client.disconnect()
+                        active_clients.pop(chat_id, None)
+                        database.clear_sync_state(chat_id)
+                        clean_session_files(chat_id)
+                        await message.reply_text(
+                            "⏰ **Code Expired.** Please type /sync again and enter the code quickly after receiving it."
+                        )
+                        return
+                
+                elif state == 'AWAITING_2FA':
+                    try:
+                        # Attempt sign-in with 2FA password
+                        await client.sign_in(password=user_text)
+                    except PasswordHashInvalidError:
+                        # Keep it connected so user can retry typing
+                        await message.reply_text("❌ **Incorrect 2FA password.** Please try again:")
+                        return
+                
+                # --- Successful Login! Run Sync Import ---
+                await message.reply_text("📥 Login Successful! Importing your Saved Messages... this might take a few moments...")
+                
+                count = 0
+                # Download last 100 Saved Messages
+                async for msg in client.iter_messages('me', limit=100):
+                    # We only import text messages, captions, or descriptions
+                    text = msg.text or msg.message or ""
+                    
+                    # Deduce media type
+                    media_type = 'text'
+                    if msg.photo:
+                        media_type = 'photo'
+                    elif msg.video:
+                        media_type = 'video'
+                    elif msg.document:
+                        media_type = 'document'
+                    elif msg.voice:
+                        media_type = 'voice'
+                    elif msg.audio:
+                        media_type = 'audio'
+                        
+                    # Skip empty messages with no content
+                    if not text and media_type == 'text':
+                        continue
+                        
+                    # Write to database directly
+                    db_id = database.add_saved_message(
+                        chat_id=chat_id,
+                        text=text,
+                        media_type=media_type,
+                        media_file_id=None,
+                        telegram_message_id=None
+                    )
+                    
+                    # Auto-extract hashtags from text
+                    hashtags = re.findall(r"#([a-zA-Z0-9_]+)", text)
+                    for tag in hashtags:
+                        database.add_tag(db_id, tag)
+                        
+                    count += 1
+                
+                # Sign out and close client
+                await client.log_out()
+                await client.disconnect()
+                active_clients.pop(chat_id, None)
+                
+                # Cleanup state and session files
+                database.clear_sync_state(chat_id)
+                clean_session_files(chat_id)
+                
+                await message.reply_text(
+                    f"✅ **Sync Finished!**\n\n"
+                    f"Imported `{count}` messages from your Saved Messages.\n\n"
+                    f"• Run /list to view and organize them.\n"
+                    f"• All temporary login sessions have been deleted.",
+                    parse_mode="Markdown"
+                )
+                
+            except Exception as e:
+                print(f"Error during sync processing: {e}")
+                if chat_id in active_clients:
+                    try:
+                        await active_clients[chat_id].disconnect()
+                    except Exception:
+                        pass
+                    active_clients.pop(chat_id, None)
+                clean_session_files(chat_id)
+                database.clear_sync_state(chat_id)
+                await message.reply_text(f"❌ **Sync Failed:** `{str(e)}`\n\nType /sync to try again.", parse_mode="Markdown")
+            return
+
+    # 2. Check if this is a reply to one of the bot's ForceReply prompts
+    if message.reply_to_message:
+        prompt = message.reply_to_message.text
+        match = re.search(r"\[ID:\s*(\d+)\]", prompt)
+        if match:
+            db_id = int(match.group(1))
+            tz = database.get_user_timezone(chat_id)
+            
+            if "reminder time" in prompt.lower():
+                reminder_time = parse_relative_time_for_user(user_text, tz)
+                if reminder_time:
+                    database.set_reminder(db_id, reminder_time)
+                    tz_obj = pytz.timezone(tz) if tz != "UTC" else pytz.utc
+                    local_time = reminder_time.replace(tzinfo=pytz.utc).astimezone(tz_obj)
+                    time_str = local_time.strftime("%Y-%m-%d %I:%M %p") + f" ({tz})"
+                    
+                    await message.reply_text(f"⏰ **Reminder Scheduled!**\nI will remind you about item {db_id} on:\n`{time_str}`", parse_mode="Markdown")
+                else:
+                    await message.reply_text(
+                        "❌ **Could not parse that time.**\n"
+                        "Please reply again and try using a format like:\n"
+                        "• `in 2 hours`\n"
+                        "• `tomorrow 3pm`\n"
+                        "• `friday 9am`\n"
+                        "• `2026-06-01 15:00`",
+                        reply_markup=ForceReply(selective=True),
+                        parse_mode="Markdown"
+                    )
+                return
+                
+            elif "tag(s) you want to add" in prompt.lower():
+                tags = [t.strip().lstrip('#').lower() for t in re.split(r"[\s,]+", user_text) if t.strip()]
+                for t in tags:
+                    if t:
+                        database.add_tag(db_id, t)
+                        
+                tag_str = ", ".join([f"#{t}" for t in tags])
+                await message.reply_text(f"🏷️ **Tags Added!**\nAdded: {tag_str}")
+                return
+
+    # 3. Standard Mode: Save incoming message directly
+    media_type = 'text'
+    media_file_id = None
+    text_content = message.text or message.caption or ""
+    
+    if message.photo:
+        media_type = 'photo'
+        media_file_id = message.photo[-1].file_id
+    elif message.video:
+        media_type = 'video'
+        media_file_id = message.video.file_id
+    elif message.document:
+        media_type = 'document'
+        media_file_id = message.document.file_id
+    elif message.audio:
+        media_type = 'audio'
+        media_file_id = message.audio.file_id
+    elif message.voice:
+        media_type = 'voice'
+        media_file_id = message.voice.file_id
+        
+    db_id = database.add_saved_message(
+        chat_id=chat_id,
+        text=text_content,
+        media_type=media_type,
+        media_file_id=media_file_id,
+        telegram_message_id=message.message_id
+    )
+    
+    hashtags = re.findall(r"#([a-zA-Z0-9_]+)", text_content)
+    for tag in hashtags:
+        database.add_tag(db_id, tag)
+        
+    tz = database.get_user_timezone(chat_id)
+    card_text, markup = get_card_content(db_id, tz)
+    await message.reply_text(card_text, reply_markup=markup, parse_mode="Markdown")
+
+# --- Callback Query Handler (Button Clicks) ---
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles button clicks from inline keyboards."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    parts = data.split(":")
+    action = parts[0]
+    
+    db_id = int(parts[-1])
+    chat_id = query.message.chat_id
+    tz = database.get_user_timezone(chat_id)
+    
+    if action == "rem":
+        time_type = parts[1]
+        now_utc = datetime.utcnow()
+        reminder_time = None
+        
+        if time_type == "1h":
+            reminder_time = now_utc + timedelta(hours=1)
+        elif time_type == "3h":
+            reminder_time = now_utc + timedelta(hours=3)
+        elif time_type == "tom":
+            reminder_time = get_tomorrow_morning_in_utc(tz)
+        elif time_type == "cust":
+            prompt = (
+                f"✍️ **Custom Reminder**\n"
+                f"Please reply directly to this message with your reminder time.\n"
+                f"Examples: 'in 45m', 'tomorrow 3pm', 'june 1st 10am'\n\n"
+                f"[ID: {db_id}]"
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=prompt,
+                reply_markup=ForceReply(selective=True),
+                parse_mode="Markdown"
+            )
+            return
+            
+        if reminder_time:
+            database.set_reminder(db_id, reminder_time)
+            card_text, markup = get_card_content(db_id, tz)
+            await query.edit_message_text(text=card_text, reply_markup=markup, parse_mode="Markdown")
+            
+    elif action == "tag":
+        if parts[1] == "add":
+            prompt = (
+                f"🏷️ **Add Tag(s)**\n"
+                f"Please reply directly to this message with the tag(s) you want to add (separated by space, e.g. 'work read todo').\n\n"
+                f"[ID: {db_id}]"
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=prompt,
+                reply_markup=ForceReply(selective=True),
+                parse_mode="Markdown"
+            )
+            return
+            
+    elif action == "arc":
+        database.mark_as_archived(db_id)
+        await query.edit_message_text(
+            text=f"📁 **Message ID {db_id} Archived!**\nIt has been removed from your active list."
+        )
+        
+    elif action == "snz":
+        snooze_type = parts[1]
+        now_utc = datetime.utcnow()
+        reminder_time = None
+        
+        if snooze_type == "1h":
+            reminder_time = now_utc + timedelta(hours=1)
+            duration_str = "1 hour"
+        elif snooze_type == "tom":
+            reminder_time = get_tomorrow_morning_in_utc(tz)
+            duration_str = "tomorrow morning"
+            
+        if reminder_time:
+            database.set_reminder(db_id, reminder_time)
+            await query.edit_message_text(text=f"⏰ **Snoozed!**\nReminder rescheduled for: {duration_str}.")
+
+# --- Factory for Telegram Application ---
+
+def get_bot_app():
+    """Builds and returns the Application instance with all handlers registered."""
+    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    
+    # Command handlers
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("list", list_command))
+    app.add_handler(CommandHandler("tags", tags_command))
+    app.add_handler(CommandHandler("search", search_command))
+    app.add_handler(CommandHandler("timezone", timezone_command))
+    app.add_handler(CommandHandler("sync", sync_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
+    
+    # Specific commands pattern handlers
+    app.add_handler(MessageHandler(filters.Regex(r"^/view_(\d+)$"), view_message_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^/archive_(\d+)$"), archive_message_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^/tag_([a-zA-Z0-9_]+)$"), tag_filter_handler))
+    
+    # Callback query handlers for buttons
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    
+    # Share Contact Handler
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    
+    # Catch-all message handler
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    
+    return app
+
+# --- Main Polling Runner (Local testing) ---
+
+if __name__ == "__main__":
+    if not config.TELEGRAM_BOT_TOKEN or config.TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ Error: TELEGRAM_BOT_TOKEN is not configured.")
+        print("Please configure it in a '.env' file or 'config.json'.")
+        exit(1)
+        
+    print("🚀 Starting bot in Polling Mode (local testing)...")
+    app = get_bot_app()
+    
+    # Setup Repeating Poller for reminders when running locally
+    async def poll_reminders(context: ContextTypes.DEFAULT_TYPE):
+        await check_and_send_due_reminders(context.bot)
+        
+    if app.job_queue:
+        app.job_queue.run_repeating(poll_reminders, interval=10, first=5)
+        print("⏰ Reminder scheduler job active (polling database every 10 seconds).")
+    else:
+        print("⚠️ Warning: JobQueue is disabled. Background reminders will not fire in polling mode.")
+        
+    app.run_polling()
