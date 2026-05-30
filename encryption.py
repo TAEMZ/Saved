@@ -1,33 +1,40 @@
 import os
 from cryptography.fernet import Fernet
 
-KEY_FILE = os.getenv("SECRET_KEY_PATH", "secret.key")
+# Priority 1: Read key directly from environment variable (for cloud/free tier hosting)
+_env_key = os.getenv("ENCRYPTION_KEY", "")
 
-# Ensure the directory for the key file exists if it is in a subdirectory
-key_dir = os.path.dirname(KEY_FILE)
-if key_dir and not os.path.exists(key_dir):
-    try:
-        os.makedirs(key_dir, exist_ok=True)
-    except Exception as e:
-        print(f"Error creating directory {key_dir} for key file: {e}")
-
-# Ensure we have a secret key file
-if os.path.exists(KEY_FILE):
-    try:
-        with open(KEY_FILE, "rb") as f:
-            _key = f.read()
-    except Exception as e:
-        print(f"Error reading {KEY_FILE}, generating new one: {e}")
-        _key = Fernet.generate_key()
-        with open(KEY_FILE, "wb") as f:
-            f.write(_key)
+if _env_key:
+    _key = _env_key.encode('utf-8')
 else:
-    _key = Fernet.generate_key()
-    try:
-        with open(KEY_FILE, "wb") as f:
-            f.write(_key)
-    except Exception as e:
-        print(f"Error saving {KEY_FILE}: {e}")
+    # Priority 2: Read from key file on disk (for local use)
+    KEY_FILE = os.getenv("SECRET_KEY_PATH", "secret.key")
+
+    # Ensure the directory for the key file exists
+    key_dir = os.path.dirname(KEY_FILE)
+    if key_dir and not os.path.exists(key_dir):
+        try:
+            os.makedirs(key_dir, exist_ok=True)
+        except Exception as e:
+            print(f"Error creating directory {key_dir} for key file: {e}")
+
+    if os.path.exists(KEY_FILE):
+        try:
+            with open(KEY_FILE, "rb") as f:
+                _key = f.read()
+        except Exception as e:
+            print(f"Error reading {KEY_FILE}, generating new one: {e}")
+            _key = Fernet.generate_key()
+            with open(KEY_FILE, "wb") as f:
+                f.write(_key)
+    else:
+        _key = Fernet.generate_key()
+        try:
+            with open(KEY_FILE, "wb") as f:
+                f.write(_key)
+            print(f"Generated new encryption key and saved to {KEY_FILE}")
+        except Exception as e:
+            print(f"Error saving {KEY_FILE}: {e}")
 
 _fernet = Fernet(_key)
 
