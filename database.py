@@ -4,11 +4,65 @@ import os
 import config
 import encryption
 
+# Determine database type (SQLite vs PostgreSQL)
+IS_POSTGRES = bool(config.DATABASE_URL and config.DATABASE_URL.startswith("postgres"))
+
+if IS_POSTGRES:
+    import psycopg2
+    import psycopg2.extras
+    # Map sqlite3.IntegrityError to psycopg2.IntegrityError so existing try/except blocks catch it
+    sqlite3.IntegrityError = psycopg2.IntegrityError
+
+class CompatibleCursor:
+    def __init__(self, cursor, is_postgres):
+        self.cursor = cursor
+        self.is_postgres = is_postgres
+        
+    def execute(self, query, params=()):
+        if self.is_postgres:
+            # Convert SQLite ? placeholders to PostgreSQL %s
+            query = query.replace('?', '%s')
+            # Convert SQLite AUTOINCREMENT to PostgreSQL SERIAL
+            if "INTEGER PRIMARY KEY AUTOINCREMENT" in query:
+                query = query.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+        return self.cursor.execute(query, params)
+        
+    def fetchone(self):
+        row = self.cursor.fetchone()
+        if row and self.is_postgres:
+            return dict(row)
+        return row
+
+    def fetchall(self):
+        rows = self.cursor.fetchall()
+        if self.is_postgres:
+            return [dict(r) for r in rows]
+        return rows
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
+
 def get_connection():
-    """Returns a connection to the SQLite database. Configures row factory to return dicts."""
-    conn = sqlite3.connect(config.DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Returns a connection to the SQLite or PostgreSQL database. Automatically wraps the cursor."""
+    if IS_POSTGRES:
+        conn = psycopg2.connect(config.DATABASE_URL)
+        original_cursor = conn.cursor
+        def wrapped_cursor(*args, **kwargs):
+            kwargs['cursor_factory'] = psycopg2.extras.RealDictCursor
+            raw_cursor = original_cursor(*args, **kwargs)
+            return CompatibleCursor(raw_cursor, True)
+        conn.cursor = wrapped_cursor
+        return conn
+    else:
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        conn.row_factory = sqlite3.Row
+        original_cursor = conn.cursor
+        def wrapped_cursor(*args, **kwargs):
+            raw_cursor = original_cursor(*args, **kwargs)
+            return CompatibleCursor(raw_cursor, False)
+        conn.cursor = wrapped_cursor
+        return conn
+
 
 def init_db():
     """Initializes the database schema if it doesn't exist."""
