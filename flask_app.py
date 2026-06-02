@@ -9,6 +9,7 @@ except AttributeError:
 import asyncio
 import threading
 import os
+import traceback
 from flask import Flask, request, jsonify
 from telegram import Update
 import config
@@ -73,15 +74,21 @@ def set_webhook():
             "Error: WEBHOOK_URL is not set. Please set the WEBHOOK_URL environment variable or "
             "add it to config.json (e.g. 'https://yourusername.pythonanywhere.com')."
         ), 400
-        
-    webhook_target_url = f"{config.WEBHOOK_URL}/webhook"
-    
+
+    if not config.TELEGRAM_BOT_TOKEN:
+        return (
+            "Error: TELEGRAM_BOT_TOKEN is not configured. Please set it as an environment variable "
+            "or in config.json."
+        ), 500
+
+    webhook_target_url = f"{config.WEBHOOK_URL.rstrip('/')}/webhook"
+
     async def register():
         return await bot_app.bot.set_webhook(
             url=webhook_target_url,
             secret_token=config.WEBHOOK_SECRET_TOKEN
         )
-        
+
     try:
         success = run_async(register())
         if success:
@@ -89,7 +96,11 @@ def set_webhook():
         else:
             return "❌ Telegram rejected webhook registration.", 500
     except Exception as e:
-        return f"❌ Failed to set webhook: {str(e)}", 500
+        traceback.print_exc()
+        return (
+            f"❌ Failed to set webhook: {type(e).__name__}: {e}",
+            500
+        )
 
 @app.route('/check_reminders', methods=['GET'])
 def check_reminders():
