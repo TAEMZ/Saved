@@ -112,10 +112,19 @@ async def _process_update_logged(update):
     start = time.time()
     try:
         print(f"[Bot] Processing update {update.update_id} starting... type={update.__class__.__name__}")
-        print(f"[Bot] Calling bot_app.process_update()...")
-        await bot_app.process_update(update)
+        print(f"[Bot] Calling bot_app.process_update() with 10s timeout...")
+        
+        # Wrap process_update in a timeout to prevent deadlocks
+        await asyncio.wait_for(
+            bot_app.process_update(update),
+            timeout=10.0
+        )
+        
         elapsed = time.time() - start
         print(f"[Bot] Processing update {update.update_id} completed successfully in {elapsed:.2f}s")
+    except asyncio.TimeoutError:
+        elapsed = time.time() - start
+        print(f"[Bot] TIMEOUT processing update {update.update_id} after {elapsed:.2f}s - process_update hung")
     except Exception as e:
         elapsed = time.time() - start
         print(f"[Bot] FAILED to process update {update.update_id} after {elapsed:.2f}s: {type(e).__name__}: {e}")
