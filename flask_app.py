@@ -34,8 +34,10 @@ _thread.start()
 
 def _log_background_exception(future):
     try:
-        future.result()
-    except Exception:
+        result = future.result()
+        print(f"[Background task completed successfully] {result}")
+    except Exception as exc:
+        print(f"[Background task FAILED] {type(exc).__name__}: {exc}")
         traceback.print_exc()
 
 
@@ -74,10 +76,13 @@ def webhook():
     try:
         update_json = request.get_json(force=True)
         update = Update.de_json(update_json, bot_app.bot)
+        print(f"[Webhook] Received update: {update.update_id}, type: {update.update_type}")
+        if update.message:
+            print(f"[Webhook] Message from {update.message.from_user.id}: {update.message.text}")
         run_async(bot_app.process_update(update), wait=False)
         return "OK", 200
     except Exception as e:
-        print(f"Error processing webhook update: {e}")
+        print(f"[Webhook ERROR] {type(e).__name__}: {e}")
         traceback.print_exc()
         return "Internal Error", 500
 
