@@ -126,80 +126,35 @@ def run_async(coro, wait=True, timeout=None):
         return None
 
 
-async def _process_update_logged(update):
-    """Wrapper around bot processing with logging."""
-    print(f"[Bot] _process_update_logged STARTED for update {update.update_id}")
+async def _process_update_in_thread(update):
+    """Process a single update on its own event loop with its own bot instance."""
+    print(f"[Bot] Processing update {update.update_id} STARTED")
     import time
     start = time.time()
     try:
-        print(f"[Bot] Processing update {update.update_id} starting... type={update.__class__.__name__}")
-        print(f"[Bot] Calling bot_app.process_update()...")
-        await bot_app.process_update(update)
+        print(f"[Bot] Creating fresh bot_app for this update...")
+        local_app = get_bot_app()
+        
+        print(f"[Bot] Initializing bot_app...")
+        await local_app.initialize()
+        
+        print(f"[Bot] Processing update {update.update_id}...")
+        await local_app.process_update(update)
+        
+        print(f"[Bot] Shutting down bot_app...")
+        await local_app.shutdown()
+        
         elapsed = time.time() - start
-        print(f"[Bot] Processing update {update.update_id} completed successfully in {elapsed:.2f}s")
+        print(f"[Bot] Update {update.update_id} completed successfully in {elapsed:.2f}s")
     except Exception as e:
         elapsed = time.time() - start
         print(f"[Bot] FAILED to process update {update.update_id} after {elapsed:.2f}s: {type(e).__name__}: {e}")
         traceback.print_exc()
 
 
-async def _heartbeat():
-    """Periodic heartbeat to verify event loop is processing coroutines."""
-    global _last_heartbeat_time
-    import time
-    count = 0
-    while True:
-        count += 1
-        now = time.time()
-        _last_heartbeat_time = now
-        print(f"[Heartbeat #{count}] Event loop is alive at {time.strftime('%H:%M:%S')}")
-        try:
-            await asyncio.sleep(5)
-        except Exception as e:
-            print(f"[Heartbeat] Exception during sleep: {e}")
-            break
-
-
-async def _startup():
-    """Async startup: initialize bot_app on the event loop where it will be used."""
-    global bot_app
-    print("[Async Startup] Starting in event loop thread...")
-    try:
-        print("[Async Startup] Creating bot_app via get_bot_app()...")
-        bot_app = get_bot_app()
-        print("[Async Startup] bot_app created, now initializing...")
-        await bot_app.initialize()
-        print("[Async Startup] bot_app initialized successfully!")
-        return True
-    except Exception as e:
-        print(f"[Async Startup ERROR] {type(e).__name__}: {e}")
-        traceback.print_exc()
-        raise
-
-
-# Initialize the bot app INSIDE the event loop before serving requests
-bot_app = None  # Will be set during async startup
-print("[Startup] Scheduling async startup on event loop...")
-try:
-    future = asyncio.run_coroutine_threadsafe(_startup(), _loop)
-    print(f"[Startup] Created startup future: {future}")
-    result = future.result(timeout=30)
-    print(f"[Startup] Async startup completed: {result}")
-    
-    # Verify event loop is running and processing tasks
-    print("[Startup] Verifying event loop is running...")
-    print(f"[Startup] Loop running: {_loop.is_running()}")
-    print(f"[Startup] Loop closed: {_loop.is_closed()}")
-    print(f"[Startup] Thread is alive: {_thread.is_alive()}")
-    print(f"[Startup] bot_app is initialized: {bot_app is not None}")
-    
-    print(f"[Startup] Scheduling heartbeat task...")
-    run_async(_heartbeat(), wait=False)
-    print("[Startup] Heartbeat scheduled")
-except Exception as e:
-    print(f"[Startup ERROR] Failed to initialize bot: {e}")
-    traceback.print_exc()
-    raise
+# Initialize the shared event loop but don't initialize bot_app on it
+# Each task gets its own bot_app instance on its own loop
+print("[Startup] Event loop and background thread ready")
 
 @app.route('/')
 def home():
@@ -216,16 +171,43 @@ def webhook():
     try:
         update_json = request.get_json(force=True)
         print(f"[Webhook] Got JSON for update")
-        update = Update.de_json(update_json, bot_app.bot)
+        update = Update.de_json(update_json, None)  # Don't use global bot_app for deserialization
         print(f"[Webhook] Deserialized update {update.update_id}")
         update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
         print(f"[Webhook] Received update {update.update_id}, type: {update_type}")
-        print(f"[Webhook] About to schedule _process_update_logged coroutine...")
-        coro = _process_update_logged(update)
-        print(f"[Webhook] Coroutine created: {coro}")
-        print(f"[Webhook] Calling run_async with wait=False...")
-        future = run_async(coro, wait=False)
-        print(f"[Webhook] run_async returned future: {future}")
+        
+        # Spawn a dedicated thread for this update with its own bot_app and event loop
+        def _run_update():
+            async def _process():
+                print(f"[Bot] Processing update {update.update_id} STARTED in dedicated thread")
+                import time
+                start = time.time()
+                try:
+                    print(f"[Bot] Creating fresh bot_app for this update...")
+                    local_app = get_bot_app()
+                    
+                    print(f"[Bot] Initializing bot_app...")
+                    await local_app.initialize()
+                    
+                    print(f"[Bot] Processing update {update.update_id}...")
+                    await local_app.process_update(update)
+                    
+                    print(f"[Bot] Shutting down bot_app...")
+                    await local_app.shutdown()
+                    
+                    elapsed = time.time() - start
+                    print(f"[Bot] Update {update.update_id} completed successfully in {elapsed:.2f}s")
+                except Exception as e:
+                    elapsed = time.time() - start
+                    print(f"[Bot] FAILED to process update {update.update_id} after {elapsed:.2f}s: {type(e).__name__}: {e}")
+                    traceback.print_exc()
+            
+            asyncio.run(_process())
+        
+        print(f"[Webhook] Spawning dedicated thread for update...")
+        t = threading.Thread(target=_run_update, daemon=True)
+        t.start()
+        
         print(f"[Webhook] Returning 200 OK")
         return "OK", 200
     except Exception as e:
@@ -250,22 +232,40 @@ def set_webhook():
 
     webhook_target_url = f"{config.WEBHOOK_URL.rstrip('/')}/webhook"
 
-    async def register():
-        return await bot_app.bot.set_webhook(
-            url=webhook_target_url,
-            secret_token=config.WEBHOOK_SECRET_TOKEN
-        )
+    async def _register():
+        print(f"[SetWebhook] Creating bot_app...")
+        local_app = get_bot_app()
+        
+        print(f"[SetWebhook] Initializing bot_app...")
+        await local_app.initialize()
+        
+        try:
+            print(f"[SetWebhook] Setting webhook to {webhook_target_url}...")
+            result = await local_app.bot.set_webhook(
+                url=webhook_target_url,
+                secret_token=config.WEBHOOK_SECRET_TOKEN
+            )
+            print(f"[SetWebhook] Webhook set successfully: {result}")
+            return result
+        finally:
+            print(f"[SetWebhook] Shutting down bot_app...")
+            await local_app.shutdown()
 
     try:
-        run_async(register(), wait=False)
+        # Run in a thread with its own event loop
+        def _run():
+            return asyncio.run(_register())
+        
+        result = _run()
         return (
-            f"✅ Webhook registration queued for: {webhook_target_url}",
-            202
+            f"✅ Webhook registered for: {webhook_target_url}",
+            200
         )
     except Exception as e:
+        print(f"[SetWebhook ERROR] {type(e).__name__}: {e}")
         traceback.print_exc()
         return (
-            f"❌ Failed to queue webhook registration: {type(e).__name__}: {e}",
+            f"❌ Failed to set webhook: {type(e).__name__}: {e}",
             500
         )
 
@@ -275,12 +275,26 @@ def check_reminders():
     token = request.args.get("token")
     if token != config.WEBHOOK_SECRET_TOKEN:
         return "Unauthorized: Invalid Secret Query Parameter", 403
-        
+    
     async def run_check():
-        return await check_and_send_due_reminders(bot_app.bot)
+        print(f"[CheckReminders] Creating bot_app...")
+        local_app = get_bot_app()
+        
+        print(f"[CheckReminders] Initializing bot_app...")
+        await local_app.initialize()
+        
+        try:
+            print(f"[CheckReminders] Checking and sending due reminders...")
+            count = await check_and_send_due_reminders(local_app.bot)
+            print(f"[CheckReminders] Reminders sent: {count}")
+            return count
+        finally:
+            print(f"[CheckReminders] Shutting down bot_app...")
+            await local_app.shutdown()
         
     try:
-        count = run_async(run_check())
+        # Run in the current thread with asyncio.run
+        count = asyncio.run(run_check())
         return jsonify({
             "status": "success",
             "message": f"Processed successfully. Reminders sent: {count}",
@@ -288,6 +302,7 @@ def check_reminders():
         }), 200
     except Exception as e:
         print(f"Error running cron check: {e}")
+        traceback.print_exc()
         return jsonify({
             "status": "error",
             "message": str(e)
