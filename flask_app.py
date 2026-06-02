@@ -105,15 +105,15 @@ def set_webhook():
         )
 
     try:
-        run_async(register(), wait=False)
-        return (
-            f"✅ Webhook registration queued for: {webhook_target_url}",
-            202
-        )
+        success = run_async(register(), wait=True, timeout=20)
+        if success:
+            return f"✅ Webhook successfully configured to: {webhook_target_url}", 200
+        else:
+            return "❌ Telegram rejected webhook registration.", 500
     except Exception as e:
         traceback.print_exc()
         return (
-            f"❌ Failed to queue webhook registration: {type(e).__name__}: {e}",
+            f"❌ Failed to set webhook: {type(e).__name__}: {e}",
             500
         )
 
