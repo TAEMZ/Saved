@@ -76,9 +76,8 @@ def webhook():
     try:
         update_json = request.get_json(force=True)
         update = Update.de_json(update_json, bot_app.bot)
-        print(f"[Webhook] Received update: {update.update_id}, type: {update.update_type}")
-        if update.message:
-            print(f"[Webhook] Message from {update.message.from_user.id}: {update.message.text}")
+        update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
+        print(f"[Webhook] Received update {update.update_id}, type: {update_type}")
         run_async(bot_app.process_update(update), wait=False)
         return "OK", 200
     except Exception as e:
