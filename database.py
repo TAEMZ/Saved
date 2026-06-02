@@ -42,26 +42,45 @@ class CompatibleCursor:
     def __getattr__(self, name):
         return getattr(self.cursor, name)
 
+class CompatibleConnection:
+    def __init__(self, conn, is_postgres):
+        self.conn = conn
+        self.is_postgres = is_postgres
+
+    def cursor(self, *args, **kwargs):
+        if self.is_postgres:
+            import psycopg2.extras
+            kwargs['cursor_factory'] = psycopg2.extras.RealDictCursor
+            return CompatibleCursor(self.conn.cursor(*args, **kwargs), True)
+        else:
+            return CompatibleCursor(self.conn.cursor(*args, **kwargs), False)
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
+    def __enter__(self):
+        self.conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self.conn.__exit__(exc_type, exc_val, exc_tb)
+
 def get_connection():
     """Returns a connection to the SQLite or PostgreSQL database. Automatically wraps the cursor."""
     if IS_POSTGRES:
         conn = psycopg2.connect(config.DATABASE_URL)
-        original_cursor = conn.cursor
-        def wrapped_cursor(*args, **kwargs):
-            kwargs['cursor_factory'] = psycopg2.extras.RealDictCursor
-            raw_cursor = original_cursor(*args, **kwargs)
-            return CompatibleCursor(raw_cursor, True)
-        conn.cursor = wrapped_cursor
-        return conn
+        return CompatibleConnection(conn, True)
     else:
         conn = sqlite3.connect(config.DATABASE_PATH)
         conn.row_factory = sqlite3.Row
-        original_cursor = conn.cursor
-        def wrapped_cursor(*args, **kwargs):
-            raw_cursor = original_cursor(*args, **kwargs)
-            return CompatibleCursor(raw_cursor, False)
-        conn.cursor = wrapped_cursor
-        return conn
+        return CompatibleConnection(conn, False)
+
 
 
 def init_db():
