@@ -191,6 +191,8 @@ def webhook():
                     update_id = update.update_id if update else "unknown"
                     update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
                     print(f"[Bot] Received update {update_id}, type: {update_type}")
+                    if update.message:
+                        print(f"[Bot] Message text: {repr(update.message.text)}, entities: {update.message.entities}")
                     
                     print(f"[Bot] Processing update {update_id}...")
                     await local_app.process_update(update)
