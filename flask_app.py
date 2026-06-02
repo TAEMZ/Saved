@@ -171,15 +171,11 @@ def webhook():
     try:
         update_json = request.get_json(force=True)
         print(f"[Webhook] Got JSON for update")
-        update = Update.de_json(update_json, None)  # Don't use global bot_app for deserialization
-        print(f"[Webhook] Deserialized update {update.update_id}")
-        update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
-        print(f"[Webhook] Received update {update.update_id}, type: {update_type}")
         
         # Spawn a dedicated thread for this update with its own bot_app and event loop
-        def _run_update():
+        def _run_update(update_json):
             async def _process():
-                print(f"[Bot] Processing update {update.update_id} STARTED in dedicated thread")
+                print(f"[Bot] Processing update in dedicated thread")
                 import time
                 start = time.time()
                 try:
@@ -189,23 +185,30 @@ def webhook():
                     print(f"[Bot] Initializing bot_app...")
                     await local_app.initialize()
                     
-                    print(f"[Bot] Processing update {update.update_id}...")
+                    # Deserialize the update using THIS bot instance
+                    print(f"[Bot] Deserializing update...")
+                    update = Update.de_json(update_json, local_app.bot)
+                    update_id = update.update_id if update else "unknown"
+                    update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
+                    print(f"[Bot] Received update {update_id}, type: {update_type}")
+                    
+                    print(f"[Bot] Processing update {update_id}...")
                     await local_app.process_update(update)
                     
                     print(f"[Bot] Shutting down bot_app...")
                     await local_app.shutdown()
                     
                     elapsed = time.time() - start
-                    print(f"[Bot] Update {update.update_id} completed successfully in {elapsed:.2f}s")
+                    print(f"[Bot] Update {update_id} completed successfully in {elapsed:.2f}s")
                 except Exception as e:
                     elapsed = time.time() - start
-                    print(f"[Bot] FAILED to process update {update.update_id} after {elapsed:.2f}s: {type(e).__name__}: {e}")
+                    print(f"[Bot] FAILED to process update after {elapsed:.2f}s: {type(e).__name__}: {e}")
                     traceback.print_exc()
             
             asyncio.run(_process())
         
         print(f"[Webhook] Spawning dedicated thread for update...")
-        t = threading.Thread(target=_run_update, daemon=True)
+        t = threading.Thread(target=_run_update, args=(update_json,), daemon=True)
         t.start()
         
         print(f"[Webhook] Returning 200 OK")
