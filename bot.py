@@ -429,6 +429,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def view_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays detailed card for a single saved message."""
+    print(f"[view_message_handler] CALLED with text: {update.message.text}")
     chat_id = update.effective_chat.id
     match = re.match(r"^/view_(\d+)$", update.message.text)
     if not match:
