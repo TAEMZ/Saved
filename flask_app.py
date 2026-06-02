@@ -23,13 +23,19 @@ app = Flask(__name__)
 # they must all share the same long-lived loop.
 
 _loop = asyncio.new_event_loop()
+_loop_started_at = None
 
 def _start_background_loop(loop):
     """Run the event loop forever in a background thread."""
+    global _loop_started_at
     asyncio.set_event_loop(loop)
+    _loop_started_at = asyncio.get_event_loop()
     print(f"[EventLoop] Starting in thread {threading.current_thread().name}...")
+    print(f"[EventLoop] Loop object: {loop}")
     try:
+        print(f"[EventLoop] About to call run_forever()...")
         loop.run_forever()
+        print(f"[EventLoop] run_forever() returned (loop was stopped)")
     except Exception as e:
         print(f"[EventLoop CRASHED] {type(e).__name__}: {e}")
         traceback.print_exc()
@@ -39,6 +45,12 @@ def _start_background_loop(loop):
 
 _thread = threading.Thread(target=_start_background_loop, args=(_loop,), daemon=True)
 _thread.start()
+print(f"[Startup] Background thread started: {_thread}")
+
+# Give the thread time to start
+import time
+time.sleep(0.1)
+print(f"[Startup] Loop started at: {_loop_started_at}, is_running: {_loop.is_running()}")
 
 def _log_background_exception(future):
     try:
@@ -47,6 +59,28 @@ def _log_background_exception(future):
     except Exception as exc:
         print(f"[Background task FAILED] {type(exc).__name__}: {exc}")
         traceback.print_exc()
+
+
+# --- Monitor thread to detect if event loop is deadlocked ---
+_last_heartbeat_time = None
+
+def _monitor_event_loop():
+    """Monitor the event loop in a separate thread to detect deadlocks."""
+    global _last_heartbeat_time
+    import time
+    while True:
+        time.sleep(10)  # Check every 10 seconds
+        now = time.time()
+        if _last_heartbeat_time is None:
+            print(f"[Monitor] WARNING: Heartbeat has never executed! Event loop may be deadlocked.")
+        elif now - _last_heartbeat_time > 15:
+            print(f"[Monitor] CRITICAL: Heartbeat stopped {now - _last_heartbeat_time:.1f}s ago! Event loop is DEADLOCKED.")
+        else:
+            print(f"[Monitor] OK: Heartbeat is healthy (last {now - _last_heartbeat_time:.1f}s ago)")
+
+_monitor_thread = threading.Thread(target=_monitor_event_loop, daemon=True)
+_monitor_thread.start()
+print(f"[Startup] Monitor thread started")
 
 
 def run_async(coro, wait=True, timeout=None):
@@ -74,21 +108,35 @@ def run_async(coro, wait=True, timeout=None):
 async def _process_update_logged(update):
     """Wrapper around bot processing with logging."""
     print(f"[Bot] _process_update_logged STARTED for update {update.update_id}")
+    import time
+    start = time.time()
     try:
-        print(f"[Bot] Processing update {update.update_id} starting...")
+        print(f"[Bot] Processing update {update.update_id} starting... type={update.__class__.__name__}")
+        print(f"[Bot] Calling bot_app.process_update()...")
         await bot_app.process_update(update)
-        print(f"[Bot] Processing update {update.update_id} completed")
+        elapsed = time.time() - start
+        print(f"[Bot] Processing update {update.update_id} completed successfully in {elapsed:.2f}s")
     except Exception as e:
-        print(f"[Bot] FAILED to process update {update.update_id}: {type(e).__name__}: {e}")
+        elapsed = time.time() - start
+        print(f"[Bot] FAILED to process update {update.update_id} after {elapsed:.2f}s: {type(e).__name__}: {e}")
         traceback.print_exc()
 
 
 async def _heartbeat():
     """Periodic heartbeat to verify event loop is processing coroutines."""
+    global _last_heartbeat_time
     import time
+    count = 0
     while True:
-        print(f"[Heartbeat] Event loop is alive at {time.strftime('%H:%M:%S')}")
-        await asyncio.sleep(5)
+        count += 1
+        now = time.time()
+        _last_heartbeat_time = now
+        print(f"[Heartbeat #{count}] Event loop is alive at {time.strftime('%H:%M:%S')}")
+        try:
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"[Heartbeat] Exception during sleep: {e}")
+            break
 
 # Initialize the bot app global instance
 bot_app = get_bot_app()
@@ -96,9 +144,15 @@ bot_app = get_bot_app()
 # Initialize the Telegram Bot Application synchronously and WAIT for it to complete
 # This must finish before the app handles any webhooks
 print("[Startup] Initializing bot application...")
+print(f"[Startup] Before init - loop.is_running(): {_loop.is_running()}")
 try:
+    print("[Startup] Calling run_async(bot_app.initialize(), wait=True)...")
     run_async(bot_app.initialize(), wait=True, timeout=30)
     print("[Startup] Bot application initialized successfully")
+    
+    # Give the loop a moment to settle
+    import time
+    time.sleep(0.5)
     
     # Verify event loop is running and processing tasks
     print("[Startup] Verifying event loop is running...")
@@ -132,8 +186,12 @@ def webhook():
         print(f"[Webhook] Deserialized update {update.update_id}")
         update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
         print(f"[Webhook] Received update {update.update_id}, type: {update_type}")
-        print(f"[Webhook] Calling run_async to schedule background processing...")
-        run_async(_process_update_logged(update), wait=False)
+        print(f"[Webhook] About to schedule _process_update_logged coroutine...")
+        coro = _process_update_logged(update)
+        print(f"[Webhook] Coroutine created: {coro}")
+        print(f"[Webhook] Calling run_async with wait=False...")
+        future = run_async(coro, wait=False)
+        print(f"[Webhook] run_async returned future: {future}")
         print(f"[Webhook] Returning 200 OK")
         return "OK", 200
     except Exception as e:
