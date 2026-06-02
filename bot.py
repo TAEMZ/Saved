@@ -238,7 +238,7 @@ def clean_session_files(chat_id):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Greets the user and displays instructions."""
-    print(f"[start_command] Called for user {update.message.from_user.id}")
+    print(f"[start_command] HANDLER CALLED for user {update.message.from_user.id}")
     text = (
         "👋 **Welcome to the Saved Messages Organizer Bot!**\n\n"
         "I'll help you organize and set reminders for messages, articles, links, or files so you never forget them.\n\n"
@@ -565,6 +565,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processes incoming user text messages (saves new content or processes replies to ForceReply / Sync code)."""
+    print(f"[handle_message] HANDLER CALLED from user {update.effective_chat.id}")
     chat_id = update.effective_chat.id
     message = update.message
     user_text = message.text.strip()
@@ -879,9 +880,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def get_bot_app():
     """Builds and returns the Application instance with all handlers registered."""
+    print(f"[get_bot_app] CALLED - Building bot with token: {config.TELEGRAM_BOT_TOKEN[:10]}...")
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    print(f"[get_bot_app] Application created")
     
     # Command handlers
+    print(f"[get_bot_app] Adding CommandHandler 'start'")
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
@@ -905,6 +909,7 @@ def get_bot_app():
     # Catch-all message handler
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     
+    print(f"[get_bot_app] ===== ALL HANDLERS REGISTERED =====")
     return app
 
 # --- Main Polling Runner (Local testing) ---

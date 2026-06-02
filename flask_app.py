@@ -47,15 +47,21 @@ def run_async(coro, wait=True, timeout=None):
     If wait is True, block until the coroutine finishes or times out.
     If wait is False, schedule it in the background and return immediately.
     """
+    print(f"[run_async] Scheduling: {coro}, wait={wait}")
     future = asyncio.run_coroutine_threadsafe(coro, _loop)
+    print(f"[run_async] Future created: {future}")
     if wait:
+        print(f"[run_async] Waiting (timeout={timeout})...")
         return future.result(timeout=timeout)
+    print(f"[run_async] Adding callback for background execution")
     future.add_done_callback(_log_background_exception)
+    print(f"[run_async] Returning immediately")
     return future
 
 
 async def _process_update_logged(update):
     """Wrapper around bot processing with logging."""
+    print(f"[Bot] _process_update_logged STARTED for update {update.update_id}")
     try:
         print(f"[Bot] Processing update {update.update_id} starting...")
         await bot_app.process_update(update)
@@ -92,11 +98,14 @@ def webhook():
 
     try:
         update_json = request.get_json(force=True)
+        print(f"[Webhook] Got JSON for update")
         update = Update.de_json(update_json, bot_app.bot)
+        print(f"[Webhook] Deserialized update {update.update_id}")
         update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
         print(f"[Webhook] Received update {update.update_id}, type: {update_type}")
-        # Process in background WITHOUT blocking
+        print(f"[Webhook] Calling run_async to schedule background processing...")
         run_async(_process_update_logged(update), wait=False)
+        print(f"[Webhook] Returning 200 OK")
         return "OK", 200
     except Exception as e:
         print(f"[Webhook ERROR] {type(e).__name__}: {e}")
