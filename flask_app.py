@@ -87,22 +87,43 @@ def run_async(coro, wait=True, timeout=None):
     """Run an async coroutine on the persistent background event loop.
 
     If wait is True, block until the coroutine finishes or times out.
-    If wait is False, schedule it in the background and return immediately.
+    If wait is False, run it in a fresh thread with its own event loop to avoid httpx blocking.
     """
     print(f"[run_async] Scheduling: {coro}, wait={wait}")
-    print(f"[run_async] Loop running: {_loop.is_running()}, closed: {_loop.is_closed()}")
-    future = asyncio.run_coroutine_threadsafe(coro, _loop)
-    print(f"[run_async] Future created: {future}")
+    
     if wait:
+        # For blocking waits (initialization), use the shared event loop
+        print(f"[run_async] Loop running: {_loop.is_running()}, closed: {_loop.is_closed()}")
+        future = asyncio.run_coroutine_threadsafe(coro, _loop)
+        print(f"[run_async] Future created: {future}")
         print(f"[run_async] Waiting (timeout={timeout})...")
         result = future.result(timeout=timeout)
         print(f"[run_async] Wait completed, result: {result}")
         return result
-    print(f"[run_async] Adding callback for background execution")
-    future.add_done_callback(_log_background_exception)
-    print(f"[run_async] Callback added")
-    print(f"[run_async] Returning immediately (future state: {future._state})")
-    return future
+    else:
+        # For background tasks, run in a dedicated thread with its own event loop
+        # This avoids httpx blocking issues that occur with run_coroutine_threadsafe
+        print(f"[run_async] Starting background task in dedicated thread...")
+        
+        def _run_in_thread():
+            try:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                print(f"[run_async thread] Created new event loop: {new_loop}")
+                print(f"[run_async thread] Running coroutine: {coro}")
+                new_loop.run_until_complete(coro)
+                print(f"[run_async thread] Task completed successfully")
+            except Exception as e:
+                print(f"[run_async thread FAILED] {type(e).__name__}: {e}")
+                traceback.print_exc()
+            finally:
+                print(f"[run_async thread] Closing event loop")
+                new_loop.close()
+        
+        t = threading.Thread(target=_run_in_thread, daemon=True)
+        t.start()
+        print(f"[run_async] Background thread started: {t}")
+        return None
 
 
 async def _process_update_logged(update):
@@ -112,19 +133,10 @@ async def _process_update_logged(update):
     start = time.time()
     try:
         print(f"[Bot] Processing update {update.update_id} starting... type={update.__class__.__name__}")
-        print(f"[Bot] Calling bot_app.process_update() with 10s timeout...")
-        
-        # Wrap process_update in a timeout to prevent deadlocks
-        await asyncio.wait_for(
-            bot_app.process_update(update),
-            timeout=10.0
-        )
-        
+        print(f"[Bot] Calling bot_app.process_update()...")
+        await bot_app.process_update(update)
         elapsed = time.time() - start
         print(f"[Bot] Processing update {update.update_id} completed successfully in {elapsed:.2f}s")
-    except asyncio.TimeoutError:
-        elapsed = time.time() - start
-        print(f"[Bot] TIMEOUT processing update {update.update_id} after {elapsed:.2f}s - process_update hung")
     except Exception as e:
         elapsed = time.time() - start
         print(f"[Bot] FAILED to process update {update.update_id} after {elapsed:.2f}s: {type(e).__name__}: {e}")
