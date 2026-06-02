@@ -39,10 +39,10 @@ def run_async(coro):
 # Initialize the bot app global instance
 bot_app = get_bot_app()
 
-# Initialize and start the Telegram Bot Application
-# (Needed for python-telegram-bot's internal handlers to prepare)
+# Initialize the Telegram Bot Application
+# Only initialize() is needed for webhook mode. Do NOT call start() —
+# that launches an update_fetcher polling task which conflicts with webhooks.
 run_async(bot_app.initialize())
-run_async(bot_app.start())
 
 @app.route('/')
 def home():
