@@ -1,0 +1,19 @@
+# Render Blueprint. One free web service running the webhook app.
+# IMPORTANT: keep workers = 1 so the in-memory Telethon /sync flow stays on one process.
+services:
+  - type: web
+    name: sare-bot
+    runtime: python
+    plan: free
+    region: frankfurt          # closest to your Supabase eu-central-1
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn flask_app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false            # set this in the Render dashboard (your Supabase Session-pooler URL)
+      - key: FERNET_KEY
+        sync: false            # set this in the Render dashboard (value from secret.key)
+      - key: WEBHOOK_URL
+        sync: false            # set this to https://saved-i6go.onrender.com
+      - key: PYTHON_VERSION
+        value: "3.12.3"

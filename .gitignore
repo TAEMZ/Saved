@@ -1,0 +1,19 @@
+# Secrets & local-only data — never commit
+secret.key
+config.json
+*.db
+*.session
+*.session-journal
+last_digest.txt
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Local test / scratch scripts
+_*.py
+*.bak
+*.bak2
+bot.log
