@@ -533,11 +533,13 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client = TelegramClient(StringSession(), api_id, api_hash)
         await client.connect()
         sent_code = await client.send_code_request(phone)
-        # Store in active_clients to keep the connection alive
-        active_clients[chat_id] = client
-        # Save the session string so we can restore exact context later
+        
+        # Save the session string BEFORE disconnecting
         session_str = client.session.save()
-        # Keep client connected (do not call client.disconnect())
+        
+        # Disconnect immediately — don't hold the client across updates
+        await client.disconnect()
+        
     except Exception as e:
         print(f"Error in Telethon connection: {e}")
         clean_session_files(chat_id)
@@ -549,7 +551,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Step 2: Code was sent successfully — save state AND session string BEFORE notifying user
+    # Step 2: Code was sent successfully — save state AND session string
     database.set_sync_state(chat_id, 'AWAITING_CODE', phone, sent_code.phone_code_hash, session_str)
 
     await update.message.reply_text(
@@ -592,29 +594,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             api_id = int(config.TELEGRAM_API_ID)
             api_hash = config.TELEGRAM_API_HASH
             
-            # Retrieve or recreate the client to preserve the session connection
-            client = active_clients.get(chat_id)
-            if not client:
-                session_str = sync_state.get('session_string') or ''
-                client = TelegramClient(StringSession(session_str), api_id, api_hash)
-                await client.connect()
-                active_clients[chat_id] = client
+            # Create a fresh Telethon client on THIS event loop using the saved session string
+            session_str = sync_state.get('session_string') or ''
+            client = TelegramClient(StringSession(session_str), api_id, api_hash)
             
             try:
-                if not client.is_connected():
-                    await client.connect()
+                print(f"[handle_message] Connecting Telethon client for user {chat_id}...")
+                await client.connect()
                 
                 if state == 'AWAITING_CODE':
                     try:
                         # Attempt sign-in with phone code
                         # Extract only digits from the code to support obfuscation (e.g. user typing '12345.' or '12345_')
                         clean_code = re.sub(r'\D', '', user_text)
+                        print(f"[handle_message] Signing in with phone code for user {chat_id}...")
                         await client.sign_in(phone, clean_code, phone_code_hash=code_hash)
                     except SessionPasswordNeededError:
                         # 2FA password required — save updated session string
                         updated_session = client.session.save()
                         database.set_sync_state(chat_id, 'AWAITING_2FA', session_string=updated_session)
-                        # Keep it connected (do not disconnect)
+                        # Disconnect after saving session
+                        await client.disconnect()
                         await message.reply_text(
                             "🔒 **Two-Factor Authentication Active**\n\n"
                             "Please enter your **Two-Factor password** below to complete authorization:",
@@ -622,12 +622,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         return
                     except PhoneCodeInvalidError:
-                        # Keep it connected so user can retry typing
+                        # Disconnect and save session for retry
+                        await client.disconnect()
+                        updated_session = client.session.save()
+                        database.set_sync_state(chat_id, 'AWAITING_CODE', phone, code_hash, updated_session)
                         await message.reply_text("❌ **Invalid verification code.** Please type the code again:")
                         return
                     except PhoneCodeExpiredError:
                         await client.disconnect()
-                        active_clients.pop(chat_id, None)
                         database.clear_sync_state(chat_id)
                         clean_session_files(chat_id)
                         await message.reply_text(
@@ -638,9 +640,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif state == 'AWAITING_2FA':
                     try:
                         # Attempt sign-in with 2FA password
+                        print(f"[handle_message] Signing in with 2FA password for user {chat_id}...")
                         await client.sign_in(password=user_text)
                     except PasswordHashInvalidError:
-                        # Keep it connected so user can retry typing
+                        # Disconnect and save session for retry
+                        await client.disconnect()
+                        updated_session = client.session.save()
+                        database.set_sync_state(chat_id, 'AWAITING_2FA', session_string=updated_session)
                         await message.reply_text("❌ **Incorrect 2FA password.** Please try again:")
                         return
                 
@@ -687,9 +693,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     count += 1
                 
                 # Sign out and close client
+                print(f"[handle_message] Logging out for user {chat_id}...")
                 await client.log_out()
                 await client.disconnect()
-                active_clients.pop(chat_id, None)
                 
                 # Cleanup state and session files
                 database.clear_sync_state(chat_id)
@@ -705,12 +711,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             except Exception as e:
                 print(f"Error during sync processing: {e}")
-                if chat_id in active_clients:
-                    try:
-                        await active_clients[chat_id].disconnect()
-                    except Exception:
-                        pass
-                    active_clients.pop(chat_id, None)
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
                 clean_session_files(chat_id)
                 database.clear_sync_state(chat_id)
                 await message.reply_text(f"❌ **Sync Failed:** `{str(e)}`\n\nType /sync to try again.", parse_mode="Markdown")
