@@ -89,7 +89,7 @@ def webhook():
         update = Update.de_json(update_json, bot_app.bot)
         update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
         print(f"[Webhook] Received update {update.update_id}, type: {update_type}")
-        run_async(bot_app.process_update(update), wait=True, timeout=10)
+        run_async(bot_app.process_update(update), wait=True, timeout=30)
         print(f"[Webhook] Update {update.update_id} processed successfully")
         return "OK", 200
     except Exception as e:

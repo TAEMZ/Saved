@@ -238,6 +238,7 @@ def clean_session_files(chat_id):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Greets the user and displays instructions."""
+    print(f"[start_command] Called for user {update.message.from_user.id}")
     text = (
         "👋 **Welcome to the Saved Messages Organizer Bot!**\n\n"
         "I'll help you organize and set reminders for messages, articles, links, or files so you never forget them.\n\n"
