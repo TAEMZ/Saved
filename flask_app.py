@@ -7,6 +7,7 @@ except AttributeError:
     pass
 
 import asyncio
+import threading
 import os
 from flask import Flask, request, jsonify
 from telegram import Update
@@ -15,17 +16,28 @@ from bot import get_bot_app, check_and_send_due_reminders
 
 app = Flask(__name__)
 
-# Initialize the bot app global instance
-bot_app = get_bot_app()
+# --- Persistent Event Loop in a Background Thread ---
+# This solves the "Event loop is closed" error that occurs when creating/destroying
+# loops per request. The bot's internal httpx client keeps connections alive, so
+# they must all share the same long-lived loop.
+
+_loop = asyncio.new_event_loop()
+
+def _start_background_loop(loop):
+    """Run the event loop forever in a background thread."""
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+_thread = threading.Thread(target=_start_background_loop, args=(_loop,), daemon=True)
+_thread.start()
 
 def run_async(coro):
-    """Utility helper to run async coroutines in a synchronous Flask context."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    """Run an async coroutine on the persistent background event loop and wait for the result."""
+    future = asyncio.run_coroutine_threadsafe(coro, _loop)
+    return future.result()
+
+# Initialize the bot app global instance
+bot_app = get_bot_app()
 
 # Initialize and start the Telegram Bot Application
 # (Needed for python-telegram-bot's internal handlers to prepare)
