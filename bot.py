@@ -431,7 +431,7 @@ async def view_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """Displays detailed card for a single saved message."""
     print(f"[view_message_handler] CALLED with text: {update.message.text}")
     chat_id = update.effective_chat.id
-    match = re.match(r"^/view_(\d+)$", update.message.text)
+    match = re.match(r"^/view_(\d+)(?:@\w+)?$", update.message.text)
     if not match:
         return
         
@@ -456,7 +456,7 @@ async def view_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def archive_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick archives a message from a command link."""
-    match = re.match(r"^/archive_(\d+)$", update.message.text)
+    match = re.match(r"^/archive_(\d+)(?:@\w+)?$", update.message.text)
     if not match:
         return
     db_id = int(match.group(1))
@@ -466,7 +466,7 @@ async def archive_message_handler(update: Update, context: ContextTypes.DEFAULT_
 async def tag_filter_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists saved messages matching the chosen tag."""
     chat_id = update.effective_chat.id
-    match = re.match(r"^/tag_([a-zA-Z0-9_]+)$", update.message.text)
+    match = re.match(r"^/tag_([a-zA-Z0-9_]+)(?:@\w+)?$", update.message.text)
     if not match:
         return
         
@@ -891,9 +891,9 @@ def get_bot_app():
     print(f"[get_bot_app] Application created")
     
      # Specific commands pattern handlers
-    app.add_handler(MessageHandler(filters.Regex(r"^/view_(\d+)$") & filters.COMMAND, view_message_handler))
-    app.add_handler(MessageHandler(filters.Regex(r"^/archive_(\d+)$") & filters.COMMAND, archive_message_handler))
-    app.add_handler(MessageHandler(filters.Regex(r"^/tag_([a-zA-Z0-9_]+)$") & filters.COMMAND, tag_filter_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^/view_(\d+)(?:@\w+)?$"), view_message_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^/archive_(\d+)(?:@\w+)?$"), archive_message_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^/tag_([a-zA-Z0-9_]+)(?:@\w+)?$"), tag_filter_handler))
     # Command handlers
     print(f"[get_bot_app] Adding CommandHandler 'start'")
     app.add_handler(CommandHandler("start", start_command))
