@@ -27,7 +27,15 @@ _loop = asyncio.new_event_loop()
 def _start_background_loop(loop):
     """Run the event loop forever in a background thread."""
     asyncio.set_event_loop(loop)
-    loop.run_forever()
+    print(f"[EventLoop] Starting in thread {threading.current_thread().name}...")
+    try:
+        loop.run_forever()
+    except Exception as e:
+        print(f"[EventLoop CRASHED] {type(e).__name__}: {e}")
+        traceback.print_exc()
+    except BaseException as e:
+        print(f"[EventLoop FATAL] {type(e).__name__}: {e}")
+        traceback.print_exc()
 
 _thread = threading.Thread(target=_start_background_loop, args=(_loop,), daemon=True)
 _thread.start()
@@ -48,14 +56,18 @@ def run_async(coro, wait=True, timeout=None):
     If wait is False, schedule it in the background and return immediately.
     """
     print(f"[run_async] Scheduling: {coro}, wait={wait}")
+    print(f"[run_async] Loop running: {_loop.is_running()}, closed: {_loop.is_closed()}")
     future = asyncio.run_coroutine_threadsafe(coro, _loop)
     print(f"[run_async] Future created: {future}")
     if wait:
         print(f"[run_async] Waiting (timeout={timeout})...")
-        return future.result(timeout=timeout)
+        result = future.result(timeout=timeout)
+        print(f"[run_async] Wait completed, result: {result}")
+        return result
     print(f"[run_async] Adding callback for background execution")
     future.add_done_callback(_log_background_exception)
-    print(f"[run_async] Returning immediately")
+    print(f"[run_async] Callback added")
+    print(f"[run_async] Returning immediately (future state: {future._state})")
     return future
 
 
@@ -70,6 +82,14 @@ async def _process_update_logged(update):
         print(f"[Bot] FAILED to process update {update.update_id}: {type(e).__name__}: {e}")
         traceback.print_exc()
 
+
+async def _heartbeat():
+    """Periodic heartbeat to verify event loop is processing coroutines."""
+    import time
+    while True:
+        print(f"[Heartbeat] Event loop is alive at {time.strftime('%H:%M:%S')}")
+        await asyncio.sleep(5)
+
 # Initialize the bot app global instance
 bot_app = get_bot_app()
 
@@ -79,6 +99,15 @@ print("[Startup] Initializing bot application...")
 try:
     run_async(bot_app.initialize(), wait=True, timeout=30)
     print("[Startup] Bot application initialized successfully")
+    
+    # Verify event loop is running and processing tasks
+    print("[Startup] Verifying event loop is running...")
+    print(f"[Startup] Loop running: {_loop.is_running()}")
+    print(f"[Startup] Loop closed: {_loop.is_closed()}")
+    print(f"[Startup] Thread is alive: {_thread.is_alive()}")
+    print(f"[Startup] Scheduling heartbeat task...")
+    run_async(_heartbeat(), wait=False)
+    print("[Startup] Heartbeat scheduled")
 except Exception as e:
     print(f"[Startup ERROR] Failed to initialize bot: {e}")
     traceback.print_exc()
