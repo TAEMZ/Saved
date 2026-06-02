@@ -32,10 +32,24 @@ def _start_background_loop(loop):
 _thread = threading.Thread(target=_start_background_loop, args=(_loop,), daemon=True)
 _thread.start()
 
-def run_async(coro):
-    """Run an async coroutine on the persistent background event loop and wait for the result."""
+def _log_background_exception(future):
+    try:
+        future.result()
+    except Exception:
+        traceback.print_exc()
+
+
+def run_async(coro, wait=True, timeout=None):
+    """Run an async coroutine on the persistent background event loop.
+
+    If wait is True, block until the coroutine finishes or times out.
+    If wait is False, schedule it in the background and return immediately.
+    """
     future = asyncio.run_coroutine_threadsafe(coro, _loop)
-    return future.result()
+    if wait:
+        return future.result(timeout=timeout)
+    future.add_done_callback(_log_background_exception)
+    return future
 
 # Initialize the bot app global instance
 bot_app = get_bot_app()
@@ -56,14 +70,15 @@ def webhook():
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret != config.WEBHOOK_SECRET_TOKEN:
         return "Unauthorized: Invalid Secret Token", 403
-        
+
     try:
         update_json = request.get_json(force=True)
         update = Update.de_json(update_json, bot_app.bot)
-        run_async(bot_app.process_update(update))
+        run_async(bot_app.process_update(update), wait=False)
         return "OK", 200
     except Exception as e:
         print(f"Error processing webhook update: {e}")
+        traceback.print_exc()
         return "Internal Error", 500
 
 @app.route('/set_webhook', methods=['GET'])
@@ -90,15 +105,15 @@ def set_webhook():
         )
 
     try:
-        success = run_async(register())
-        if success:
-            return f"✅ Webhook successfully configured to: {webhook_target_url}", 200
-        else:
-            return "❌ Telegram rejected webhook registration.", 500
+        run_async(register(), wait=False)
+        return (
+            f"✅ Webhook registration queued for: {webhook_target_url}",
+            202
+        )
     except Exception as e:
         traceback.print_exc()
         return (
-            f"❌ Failed to set webhook: {type(e).__name__}: {e}",
+            f"❌ Failed to queue webhook registration: {type(e).__name__}: {e}",
             500
         )
 
