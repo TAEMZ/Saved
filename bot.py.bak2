@@ -238,7 +238,6 @@ def clean_session_files(chat_id):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Greets the user and displays instructions."""
-    print(f"[start_command] HANDLER CALLED for user {update.message.from_user.id}")
     text = (
         "👋 **Welcome to the Saved Messages Organizer Bot!**\n\n"
         "I'll help you organize and set reminders for messages, articles, links, or files so you never forget them.\n\n"
@@ -307,13 +306,12 @@ async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists unarchived saved items with links to view them."""
     chat_id = update.effective_chat.id
-    loading_msg = await update.message.reply_text("⏳ Loading your saved messages...")
     messages = database.get_active_messages(chat_id)
     if not messages:
-        await loading_msg.edit_text("📂 You have no active saved messages.")
+        await update.message.reply_text("📂 You have no active saved messages.")
         return
         
-    text = "📂 **Your Active Saved Messages:**\n\n"
+    text = "📂 Your Active Saved Messages:\n\n"
     for i, msg in enumerate(messages, 1):
         snippet = msg['text'] or "(No text content)"
         if len(snippet) > 50:
@@ -329,7 +327,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{i}. {snippet}{tag_str}\n"
         text += f"   🔍 View: /view_{msg['id']}  |  📁 Archive: /archive_{msg['id']}\n\n"
         
-    await loading_msg.edit_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists all tags and provides commands to filter by them."""
@@ -339,10 +337,10 @@ async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🏷️ You don't have any tags yet. Tag messages by clicking 'Add Tag' or including hashtags (e.g. #read) in your messages.")
         return
         
-    text = "🏷️ **Your Tags:**\n\n"
+    text = "🏷️ Your Tags:\n\n"
     for tag in tags:
         text += f"• #{tag} — Filter: /tag_{tag}\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Searches messages and tags."""
@@ -357,7 +355,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔍 No messages found matching '{query}'.")
         return
         
-    text = f"🔍 **Search Results for '{query}':**\n\n"
+    text = f"🔍 Search Results for '{query}':\n\n"
     for i, msg in enumerate(results, 1):
         snippet = msg['text'] or "(No text content)"
         if len(snippet) > 50:
@@ -373,7 +371,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{i}. {snippet}{tag_str}\n"
         text += f"   🔍 View: /view_{msg['id']}  |  📁 Archive: /archive_{msg['id']}\n\n"
         
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 # --- On-Demand History Sync (/sync) Handlers ---
 
@@ -475,7 +473,7 @@ async def tag_filter_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"🏷️ No active messages found with tag #{tag_name}.")
         return
         
-    text = f"🏷️ **Active messages with tag #{tag_name}:**\n\n"
+    text = f"🏷️ Active messages with tag #{tag_name}:\n\n"
     for i, msg in enumerate(messages, 1):
         snippet = msg['text'] or "(No text content)"
         if len(snippet) > 50:
@@ -488,7 +486,7 @@ async def tag_filter_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         text += f"{i}. {snippet}\n"
         text += f"   🔍 View: /view_{msg['id']}  |  📁 Archive: /archive_{msg['id']}\n\n"
         
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 # --- Message and Reply Parsing ---
 
@@ -534,13 +532,11 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client = TelegramClient(StringSession(), api_id, api_hash)
         await client.connect()
         sent_code = await client.send_code_request(phone)
-        
-        # Save the session string BEFORE disconnecting
+        # Store in active_clients to keep the connection alive
+        active_clients[chat_id] = client
+        # Save the session string so we can restore exact context later
         session_str = client.session.save()
-        
-        # Disconnect immediately — don't hold the client across updates
-        await client.disconnect()
-        
+        # Keep client connected (do not call client.disconnect())
     except Exception as e:
         print(f"Error in Telethon connection: {e}")
         clean_session_files(chat_id)
@@ -552,7 +548,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Step 2: Code was sent successfully — save state AND session string
+    # Step 2: Code was sent successfully — save state AND session string BEFORE notifying user
     database.set_sync_state(chat_id, 'AWAITING_CODE', phone, sent_code.phone_code_hash, session_str)
 
     await update.message.reply_text(
@@ -568,7 +564,6 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processes incoming user text messages (saves new content or processes replies to ForceReply / Sync code)."""
-    print(f"[handle_message] HANDLER CALLED from user {update.effective_chat.id}")
     chat_id = update.effective_chat.id
     message = update.message
     user_text = message.text.strip()
@@ -595,27 +590,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             api_id = int(config.TELEGRAM_API_ID)
             api_hash = config.TELEGRAM_API_HASH
             
-            # Create a fresh Telethon client on THIS event loop using the saved session string
-            session_str = sync_state.get('session_string') or ''
-            client = TelegramClient(StringSession(session_str), api_id, api_hash)
+            # Retrieve or recreate the client to preserve the session connection
+            client = active_clients.get(chat_id)
+            if not client:
+                session_str = sync_state.get('session_string') or ''
+                client = TelegramClient(StringSession(session_str), api_id, api_hash)
+                await client.connect()
+                active_clients[chat_id] = client
             
             try:
-                print(f"[handle_message] Connecting Telethon client for user {chat_id}...")
-                await client.connect()
+                if not client.is_connected():
+                    await client.connect()
                 
                 if state == 'AWAITING_CODE':
                     try:
                         # Attempt sign-in with phone code
                         # Extract only digits from the code to support obfuscation (e.g. user typing '12345.' or '12345_')
                         clean_code = re.sub(r'\D', '', user_text)
-                        print(f"[handle_message] Signing in with phone code for user {chat_id}...")
                         await client.sign_in(phone, clean_code, phone_code_hash=code_hash)
                     except SessionPasswordNeededError:
                         # 2FA password required — save updated session string
                         updated_session = client.session.save()
                         database.set_sync_state(chat_id, 'AWAITING_2FA', session_string=updated_session)
-                        # Disconnect after saving session
-                        await client.disconnect()
+                        # Keep it connected (do not disconnect)
                         await message.reply_text(
                             "🔒 **Two-Factor Authentication Active**\n\n"
                             "Please enter your **Two-Factor password** below to complete authorization:",
@@ -623,14 +620,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         return
                     except PhoneCodeInvalidError:
-                        # Disconnect and save session for retry
-                        await client.disconnect()
-                        updated_session = client.session.save()
-                        database.set_sync_state(chat_id, 'AWAITING_CODE', phone, code_hash, updated_session)
+                        # Keep it connected so user can retry typing
                         await message.reply_text("❌ **Invalid verification code.** Please type the code again:")
                         return
                     except PhoneCodeExpiredError:
                         await client.disconnect()
+                        active_clients.pop(chat_id, None)
                         database.clear_sync_state(chat_id)
                         clean_session_files(chat_id)
                         await message.reply_text(
@@ -641,13 +636,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif state == 'AWAITING_2FA':
                     try:
                         # Attempt sign-in with 2FA password
-                        print(f"[handle_message] Signing in with 2FA password for user {chat_id}...")
                         await client.sign_in(password=user_text)
                     except PasswordHashInvalidError:
-                        # Disconnect and save session for retry
-                        await client.disconnect()
-                        updated_session = client.session.save()
-                        database.set_sync_state(chat_id, 'AWAITING_2FA', session_string=updated_session)
+                        # Keep it connected so user can retry typing
                         await message.reply_text("❌ **Incorrect 2FA password.** Please try again:")
                         return
                 
@@ -694,9 +685,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     count += 1
                 
                 # Sign out and close client
-                print(f"[handle_message] Logging out for user {chat_id}...")
                 await client.log_out()
                 await client.disconnect()
+                active_clients.pop(chat_id, None)
                 
                 # Cleanup state and session files
                 database.clear_sync_state(chat_id)
@@ -712,10 +703,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             except Exception as e:
                 print(f"Error during sync processing: {e}")
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
+                if chat_id in active_clients:
+                    try:
+                        await active_clients[chat_id].disconnect()
+                    except Exception:
+                        pass
+                    active_clients.pop(chat_id, None)
                 clean_session_files(chat_id)
                 database.clear_sync_state(chat_id)
                 await message.reply_text(f"❌ **Sync Failed:** `{str(e)}`\n\nType /sync to try again.", parse_mode="Markdown")
@@ -885,16 +878,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def get_bot_app():
     """Builds and returns the Application instance with all handlers registered."""
-    print(f"[get_bot_app] CALLED - Building bot with token: {config.TELEGRAM_BOT_TOKEN[:10]}...")
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-    print(f"[get_bot_app] Application created")
     
-     # Specific commands pattern handlers
-    app.add_handler(MessageHandler(filters.Regex(r"^/view_(\d+)$"), view_message_handler))
-    app.add_handler(MessageHandler(filters.Regex(r"^/archive_(\d+)$"), archive_message_handler))
-    app.add_handler(MessageHandler(filters.Regex(r"^/tag_([a-zA-Z0-9_]+)$"), tag_filter_handler))
     # Command handlers
-    print(f"[get_bot_app] Adding CommandHandler 'start'")
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
@@ -904,7 +890,10 @@ def get_bot_app():
     app.add_handler(CommandHandler("sync", sync_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     
-   
+    # Specific commands pattern handlers
+    app.add_handler(MessageHandler(filters.Regex(r"^/view_(\d+)$"), view_message_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^/archive_(\d+)$"), archive_message_handler))
+    app.add_handler(MessageHandler(filters.Regex(r"^/tag_([a-zA-Z0-9_]+)$"), tag_filter_handler))
     
     # Callback query handlers for buttons
     app.add_handler(CallbackQueryHandler(callback_handler))
@@ -915,7 +904,6 @@ def get_bot_app():
     # Catch-all message handler
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     
-    print(f"[get_bot_app] ===== ALL HANDLERS REGISTERED =====")
     return app
 
 # --- Main Polling Runner (Local testing) ---
