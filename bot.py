@@ -891,9 +891,9 @@ def get_bot_app():
     print(f"[get_bot_app] Application created")
     
      # Specific commands pattern handlers
-    app.add_handler(MessageHandler(filters.Regex(r"^/view_(\d+)(?:@\w+)?$"), view_message_handler))
-    app.add_handler(MessageHandler(filters.Regex(r"^/archive_(\d+)(?:@\w+)?$"), archive_message_handler))
-    app.add_handler(MessageHandler(filters.Regex(r"^/tag_([a-zA-Z0-9_]+)(?:@\w+)?$"), tag_filter_handler))
+    app.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r"^/view_(\d+)(?:@\w+)?$"), view_message_handler))
+    app.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r"^/archive_(\d+)(?:@\w+)?$"), archive_message_handler))
+    app.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r"^/tag_([a-zA-Z0-9_]+)(?:@\w+)?$"), tag_filter_handler))
     # Command handlers
     print(f"[get_bot_app] Adding CommandHandler 'start'")
     app.add_handler(CommandHandler("start", start_command))
