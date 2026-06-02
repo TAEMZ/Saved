@@ -138,27 +138,40 @@ async def _heartbeat():
             print(f"[Heartbeat] Exception during sleep: {e}")
             break
 
-# Initialize the bot app global instance
-bot_app = get_bot_app()
 
-# Initialize the Telegram Bot Application synchronously and WAIT for it to complete
-# This must finish before the app handles any webhooks
-print("[Startup] Initializing bot application...")
-print(f"[Startup] Before init - loop.is_running(): {_loop.is_running()}")
+async def _startup():
+    """Async startup: initialize bot_app on the event loop where it will be used."""
+    global bot_app
+    print("[Async Startup] Starting in event loop thread...")
+    try:
+        print("[Async Startup] Creating bot_app via get_bot_app()...")
+        bot_app = get_bot_app()
+        print("[Async Startup] bot_app created, now initializing...")
+        await bot_app.initialize()
+        print("[Async Startup] bot_app initialized successfully!")
+        return True
+    except Exception as e:
+        print(f"[Async Startup ERROR] {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise
+
+
+# Initialize the bot app INSIDE the event loop before serving requests
+bot_app = None  # Will be set during async startup
+print("[Startup] Scheduling async startup on event loop...")
 try:
-    print("[Startup] Calling run_async(bot_app.initialize(), wait=True)...")
-    run_async(bot_app.initialize(), wait=True, timeout=30)
-    print("[Startup] Bot application initialized successfully")
-    
-    # Give the loop a moment to settle
-    import time
-    time.sleep(0.5)
+    future = asyncio.run_coroutine_threadsafe(_startup(), _loop)
+    print(f"[Startup] Created startup future: {future}")
+    result = future.result(timeout=30)
+    print(f"[Startup] Async startup completed: {result}")
     
     # Verify event loop is running and processing tasks
     print("[Startup] Verifying event loop is running...")
     print(f"[Startup] Loop running: {_loop.is_running()}")
     print(f"[Startup] Loop closed: {_loop.is_closed()}")
     print(f"[Startup] Thread is alive: {_thread.is_alive()}")
+    print(f"[Startup] bot_app is initialized: {bot_app is not None}")
+    
     print(f"[Startup] Scheduling heartbeat task...")
     run_async(_heartbeat(), wait=False)
     print("[Startup] Heartbeat scheduled")
