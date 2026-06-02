@@ -67,10 +67,16 @@ async def _process_update_logged(update):
 # Initialize the bot app global instance
 bot_app = get_bot_app()
 
-# Initialize the Telegram Bot Application
-# Only initialize() is needed for webhook mode. Do NOT call start() —
-# that launches an update_fetcher polling task which conflicts with webhooks.
-run_async(bot_app.initialize())
+# Initialize the Telegram Bot Application synchronously and WAIT for it to complete
+# This must finish before the app handles any webhooks
+print("[Startup] Initializing bot application...")
+try:
+    run_async(bot_app.initialize(), wait=True, timeout=30)
+    print("[Startup] Bot application initialized successfully")
+except Exception as e:
+    print(f"[Startup ERROR] Failed to initialize bot: {e}")
+    traceback.print_exc()
+    raise
 
 @app.route('/')
 def home():
@@ -89,8 +95,8 @@ def webhook():
         update = Update.de_json(update_json, bot_app.bot)
         update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
         print(f"[Webhook] Received update {update.update_id}, type: {update_type}")
-        run_async(bot_app.process_update(update), wait=True, timeout=30)
-        print(f"[Webhook] Update {update.update_id} processed successfully")
+        # Process in background WITHOUT blocking
+        run_async(_process_update_logged(update), wait=False)
         return "OK", 200
     except Exception as e:
         print(f"[Webhook ERROR] {type(e).__name__}: {e}")
