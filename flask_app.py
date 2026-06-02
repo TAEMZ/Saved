@@ -53,6 +53,17 @@ def run_async(coro, wait=True, timeout=None):
     future.add_done_callback(_log_background_exception)
     return future
 
+
+async def _process_update_logged(update):
+    """Wrapper around bot processing with logging."""
+    try:
+        print(f"[Bot] Processing update {update.update_id} starting...")
+        await bot_app.process_update(update)
+        print(f"[Bot] Processing update {update.update_id} completed")
+    except Exception as e:
+        print(f"[Bot] FAILED to process update {update.update_id}: {type(e).__name__}: {e}")
+        traceback.print_exc()
+
 # Initialize the bot app global instance
 bot_app = get_bot_app()
 
@@ -78,7 +89,8 @@ def webhook():
         update = Update.de_json(update_json, bot_app.bot)
         update_type = "message" if update.message else ("callback_query" if update.callback_query else "other")
         print(f"[Webhook] Received update {update.update_id}, type: {update_type}")
-        run_async(bot_app.process_update(update), wait=False)
+        run_async(bot_app.process_update(update), wait=True, timeout=10)
+        print(f"[Webhook] Update {update.update_id} processed successfully")
         return "OK", 200
     except Exception as e:
         print(f"[Webhook ERROR] {type(e).__name__}: {e}")
