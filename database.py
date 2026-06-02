@@ -134,10 +134,29 @@ def init_db():
             )
         ''')
         # Add session_string column if it doesn't exist (for existing databases)
-        try:
-            cursor.execute('ALTER TABLE sync_states ADD COLUMN session_string TEXT')
-        except Exception:
-            pass
+        has_column = False
+        if IS_POSTGRES:
+            cursor.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = 'sync_states' AND column_name = 'session_string'"
+            )
+            has_column = bool(cursor.fetchone())
+        else:
+            cursor.execute("PRAGMA table_info(sync_states)")
+            for col in cursor.fetchall():
+                try:
+                    col_name = col['name']
+                except (TypeError, KeyError, IndexError):
+                    col_name = col[1]
+                if col_name == 'session_string':
+                    has_column = True
+                    break
+
+        if not has_column:
+            try:
+                cursor.execute('ALTER TABLE sync_states ADD COLUMN session_string TEXT')
+            except Exception:
+                pass
+
         
         # Indexes for fast lookup
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_id ON saved_messages(chat_id)')
