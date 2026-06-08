@@ -157,12 +157,13 @@ def get_card_content(db_id, user_timezone_str="UTC"):
         
     if len(content) > 300:
         content = content[:297] + "..."
-        
+    
+    # Remove markdown formatting since we're not using parse_mode
     text = (
-        f"📥 **Message Saved!**\n\n"
-        f"📝 **Content:** {content}\n"
-        f"🏷️ **Tags:** {tags_str}\n"
-        f"⏰ **Reminder:** {reminder_str}\n"
+        f"📥 Message Saved!\n\n"
+        f"📝 Content: {content}\n"
+        f"🏷️ Tags: {tags_str}\n"
+        f"⏰ Reminder: {reminder_str}\n"
     )
     
     markup = make_card_markup(db_id, has_reminder=bool(msg['reminder_time']))
@@ -481,8 +482,9 @@ async def view_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         await context.bot.send_voice(chat_id=chat_id, voice=msg['media_file_id'], caption=caption)
                 except Exception as e:
                     print(f"Failed to send media file_id {msg['media_file_id']}: {e}")
-                    
-        await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
+        
+        # Send card without parse_mode to avoid markdown errors with user content
+        await update.message.reply_text(text, reply_markup=markup)
     else:
         await update.message.reply_text(text)
 
@@ -844,7 +846,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     tz = database.get_user_timezone(chat_id)
     card_text, markup = get_card_content(db_id, tz)
-    await message.reply_text(card_text, reply_markup=markup, parse_mode="Markdown")
+    await message.reply_text(card_text, reply_markup=markup)
 
 # --- Callback Query Handler (Button Clicks) ---
 
@@ -890,7 +892,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reminder_time:
             database.set_reminder(db_id, reminder_time)
             card_text, markup = get_card_content(db_id, tz)
-            await query.edit_message_text(text=card_text, reply_markup=markup, parse_mode="Markdown")
+            await query.edit_message_text(text=card_text, reply_markup=markup)
             
     elif action == "tag":
         if parts[1] == "add":
