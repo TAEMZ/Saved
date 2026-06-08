@@ -451,15 +451,37 @@ async def view_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     
     if markup:
         msg = database.get_message_details(db_id)
-        if msg and msg['telegram_message_id']:
-            try:
-                await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=chat_id,
-                    message_id=msg['telegram_message_id']
-                )
-            except Exception:
-                pass
+        if msg:
+            # Try to re-send the original message first
+            sent = False
+            if msg['telegram_message_id']:
+                try:
+                    await context.bot.copy_message(
+                        chat_id=chat_id,
+                        from_chat_id=chat_id,
+                        message_id=msg['telegram_message_id']
+                    )
+                    sent = True
+                except Exception as e:
+                    print(f"Failed to copy message {msg['telegram_message_id']}: {e}")
+            
+            # Fallback: If copy failed or no telegram_message_id, try sending media by file_id
+            if not sent and msg['media_file_id']:
+                try:
+                    caption = msg['text'] or None
+                    if msg['media_type'] == 'photo':
+                        await context.bot.send_photo(chat_id=chat_id, photo=msg['media_file_id'], caption=caption)
+                    elif msg['media_type'] == 'video':
+                        await context.bot.send_video(chat_id=chat_id, video=msg['media_file_id'], caption=caption)
+                    elif msg['media_type'] == 'document':
+                        await context.bot.send_document(chat_id=chat_id, document=msg['media_file_id'], caption=caption)
+                    elif msg['media_type'] == 'audio':
+                        await context.bot.send_audio(chat_id=chat_id, audio=msg['media_file_id'], caption=caption)
+                    elif msg['media_type'] == 'voice':
+                        await context.bot.send_voice(chat_id=chat_id, voice=msg['media_file_id'], caption=caption)
+                except Exception as e:
+                    print(f"Failed to send media file_id {msg['media_file_id']}: {e}")
+                    
         await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
     else:
         await update.message.reply_text(text)
@@ -736,10 +758,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Check if this is a reply to one of the bot's ForceReply prompts
     if message.reply_to_message:
         prompt = message.reply_to_message.text
+        print(f"[handle_message] Detected reply to message: {prompt[:100]}")
         match = re.search(r"\[ID:\s*(\d+)\]", prompt)
         if match:
             db_id = int(match.group(1))
+            print(f"[handle_message] Extracted message ID: {db_id}")
             tz = database.get_user_timezone(chat_id)
+            
+            # Check if message exists
+            msg = database.get_message_details(db_id)
+            if not msg:
+                print(f"[handle_message] ERROR: Message ID {db_id} not found in database!")
+                await message.reply_text(f"⚠️ Saved message not found. It may have been deleted or archived.")
+                return
             
             if "reminder time" in prompt.lower():
                 reminder_time = parse_relative_time_for_user(user_text, tz)
@@ -764,14 +795,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
                 
             elif "tag(s) you want to add" in prompt.lower():
+                print(f"[handle_message] Processing tag addition for message ID {db_id}")
                 tags = [t.strip().lstrip('#').lower() for t in re.split(r"[\s,]+", user_text) if t.strip()]
+                print(f"[handle_message] Parsed tags: {tags}")
                 for t in tags:
                     if t:
                         database.add_tag(db_id, t)
+                        print(f"[handle_message] Added tag '{t}' to message {db_id}")
                         
                 tag_str = ", ".join([f"#{t}" for t in tags])
                 await message.reply_text(f"🏷️ **Tags Added!**\nAdded: {tag_str}")
                 return
+        else:
+            print(f"[handle_message] No [ID: X] pattern found in reply prompt")
 
     # 3. Standard Mode: Save incoming message directly
     media_type = 'text'
