@@ -119,9 +119,34 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_settings (
                 chat_id INTEGER PRIMARY KEY,
-                timezone TEXT DEFAULT 'UTC'
+                timezone TEXT DEFAULT 'UTC',
+                last_sync_message_id INTEGER DEFAULT 0
             )
         ''')
+        
+        # Add last_sync_message_id column if it doesn't exist (for existing databases)
+        has_sync_col = False
+        if IS_POSTGRES:
+            cursor.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = 'user_settings' AND column_name = 'last_sync_message_id'"
+            )
+            has_sync_col = bool(cursor.fetchone())
+        else:
+            cursor.execute("PRAGMA table_info(user_settings)")
+            for col in cursor.fetchall():
+                try:
+                    col_name = col['name']
+                except (TypeError, KeyError, IndexError):
+                    col_name = col[1]
+                if col_name == 'last_sync_message_id':
+                    has_sync_col = True
+                    break
+
+        if not has_sync_col:
+            try:
+                cursor.execute('ALTER TABLE user_settings ADD COLUMN last_sync_message_id INTEGER DEFAULT 0')
+            except Exception:
+                pass
         
         # Create sync_states table for on-demand history sync state tracking
         cursor.execute('''
@@ -182,6 +207,25 @@ def get_user_timezone(chat_id):
         cursor.execute('SELECT timezone FROM user_settings WHERE chat_id = ?', (chat_id,))
         row = cursor.fetchone()
         return row['timezone'] if row else 'UTC'
+
+def get_last_sync_message_id(chat_id):
+    """Gets the last synced Telegram message ID for a user."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT last_sync_message_id FROM user_settings WHERE chat_id = ?', (chat_id,))
+        row = cursor.fetchone()
+        return row['last_sync_message_id'] if row else 0
+
+def set_last_sync_message_id(chat_id, message_id):
+    """Updates the last synced message ID for a user."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO user_settings (chat_id, last_sync_message_id)
+            VALUES (?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET last_sync_message_id = excluded.last_sync_message_id
+        ''', (chat_id, message_id))
+        conn.commit()
 
 def set_sync_state(chat_id, state, phone=None, phone_code_hash=None, session_string=None):
     """Saves or updates the temporary sync state for a user's on-demand history import."""

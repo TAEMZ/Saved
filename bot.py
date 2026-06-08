@@ -741,15 +741,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         return
                 
                 # --- Successful Login! Run Sync Import ---
-                progress_msg = await message.reply_text("📥 Login Successful! Importing your Saved Messages...\n\nFetching messages: 0")
+                # Check if this is first sync or incremental
+                last_sync_id = database.get_last_sync_message_id(chat_id)
+                
+                if last_sync_id > 0:
+                    progress_msg = await message.reply_text(f"📥 Running incremental sync...\n\nChecking for new messages since last sync...")
+                else:
+                    progress_msg = await message.reply_text("📥 Login Successful! Running first-time full sync...\n\nFetching messages: 0")
                 
                 count = 0
                 media_count = 0
                 skipped_count = 0
                 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB limit
+                highest_message_id = last_sync_id  # Track the newest message we see
                 
-                # Download ALL Saved Messages (no limit)
-                async for msg in client.iter_messages('me'):
+                # Download messages (only new ones if we have last_sync_id)
+                async for msg in client.iter_messages('me', min_id=last_sync_id):
+                    # Track the highest message ID we've seen
+                    if msg.id > highest_message_id:
+                        highest_message_id = msg.id
+                    
                     # Update progress every 50 messages (not too spammy)
                     if count > 0 and count % 50 == 0:
                         try:
@@ -860,6 +871,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         
                     count += 1
                 
+                # Save the highest message ID we saw for next sync
+                if highest_message_id > last_sync_id:
+                    database.set_last_sync_message_id(chat_id, highest_message_id)
+                
                 # Sign out and close client
                 print(f"[handle_message] Logging out for user {chat_id}...")
                 await client.log_out()
@@ -869,11 +884,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 database.clear_sync_state(chat_id)
                 clean_session_files(chat_id)
                 
+                # Show different message for first sync vs incremental
+                if last_sync_id > 0:
+                    sync_type = "📥 **Incremental Sync Complete!**"
+                else:
+                    sync_type = "✅ **First Sync Complete!**"
+                
                 await message.reply_text(
-                    f"✅ **Sync Finished!**\n\n"
-                    f"Imported `{count}` messages from your Saved Messages.\n"
+                    f"{sync_type}\n\n"
+                    f"Imported `{count}` messages.\n"
                     f"📎 Uploaded `{media_count}` media files (photos, small docs).\n"
                     f"⏭️ Skipped `{skipped_count}` large files (videos, large docs).\n\n"
+                    f"💡 Next time you run `/sync`, I'll only fetch new messages!\n\n"
                     f"• Run /list to view and organize them.\n"
                     f"• All temporary login sessions have been deleted.",
                     parse_mode="Markdown"
