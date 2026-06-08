@@ -760,10 +760,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Check if this is a reply to one of the bot's ForceReply prompts
     if message.reply_to_message:
         prompt = message.reply_to_message.text
-        print(f"[handle_message] Detected reply to message: {prompt[:100]}")
-        match = re.search(r"\[ID:\s*(\d+)\]", prompt)
+        print(f"[handle_message] Detected reply to message (full text): {repr(prompt)}")
+        # Match either old format [ID: 94] or new format (Message ID: 94)
+        match = re.search(r"(?:\[ID:\s*(\d+)\]|\(Message ID:\s*(\d+)\))", prompt)
         if match:
-            db_id = int(match.group(1))
+            db_id = int(match.group(1) or match.group(2))
             print(f"[handle_message] Extracted message ID: {db_id}")
             tz = database.get_user_timezone(chat_id)
             
@@ -879,7 +880,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✍️ **Custom Reminder**\n"
                 f"Please reply directly to this message with your reminder time.\n"
                 f"Examples: 'in 45m', 'tomorrow 3pm', 'june 1st 10am'\n\n"
-                f"\\[ID: {db_id}\\]"  # Escape square brackets for Markdown
+                f"(Message ID: {db_id})"  # Use parentheses instead of brackets
             )
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -899,7 +900,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prompt = (
                 f"🏷️ **Add Tag(s)**\n"
                 f"Please reply directly to this message with the tag(s) you want to add (separated by space, e.g. 'work read todo').\n\n"
-                f"\\[ID: {db_id}\\]"  # Escape square brackets for Markdown
+                f"(Message ID: {db_id})"  # Use parentheses instead of brackets
             )
             await context.bot.send_message(
                 chat_id=chat_id,
