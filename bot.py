@@ -879,7 +879,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✍️ **Custom Reminder**\n"
                 f"Please reply directly to this message with your reminder time.\n"
                 f"Examples: 'in 45m', 'tomorrow 3pm', 'june 1st 10am'\n\n"
-                f"[ID: {db_id}]"
+                f"\\[ID: {db_id}\\]"  # Escape square brackets for Markdown
             )
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -899,7 +899,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prompt = (
                 f"🏷️ **Add Tag(s)**\n"
                 f"Please reply directly to this message with the tag(s) you want to add (separated by space, e.g. 'work read todo').\n\n"
-                f"[ID: {db_id}]"
+                f"\\[ID: {db_id}\\]"  # Escape square brackets for Markdown
             )
             await context.bot.send_message(
                 chat_id=chat_id,
