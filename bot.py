@@ -75,6 +75,8 @@ def parse_relative_time_for_user(text, user_timezone_str):
     now_local = datetime.now(user_tz)
     
     text_lower = text.lower().strip()
+    
+    # Handle common shortcuts
     if text_lower in ["1h", "1 hour", "in 1 hour", "in 1h"]:
         return datetime.utcnow() + timedelta(hours=1)
     if text_lower in ["3h", "3 hours", "in 3 hours", "in 3h"]:
@@ -87,7 +89,29 @@ def parse_relative_time_for_user(text, user_timezone_str):
     if text_lower == "tomorrow":
         tomorrow_local = now_local.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
         return tomorrow_local.astimezone(pytz.utc).replace(tzinfo=None)
+    
+    # Handle relative time with minutes/hours/days/weeks/months
+    match = re.match(r'in\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks|month|months|year|years)$', text_lower)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        
+        if unit in ['m', 'min', 'mins', 'minute', 'minutes']:
+            return datetime.utcnow() + timedelta(minutes=amount)
+        elif unit in ['h', 'hr', 'hrs', 'hour', 'hours']:
+            return datetime.utcnow() + timedelta(hours=amount)
+        elif unit in ['d', 'day', 'days']:
+            return datetime.utcnow() + timedelta(days=amount)
+        elif unit in ['w', 'week', 'weeks']:
+            return datetime.utcnow() + timedelta(weeks=amount)
+        elif unit in ['month', 'months']:
+            # Approximate: 30 days per month
+            return datetime.utcnow() + timedelta(days=amount * 30)
+        elif unit in ['year', 'years']:
+            # Approximate: 365 days per year
+            return datetime.utcnow() + timedelta(days=amount * 365)
 
+    # Use dateparser for complex dates
     parsed = dateparser.parse(
         text,
         settings={
@@ -453,35 +477,49 @@ async def view_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if markup:
         msg = database.get_message_details(db_id)
         if msg:
+            print(f"[view_message_handler] Message details: media_type={msg['media_type']}, has_telegram_id={bool(msg['telegram_message_id'])}, has_file_id={bool(msg['media_file_id'])}")
+            
             # Try to re-send the original message first
             sent = False
             if msg['telegram_message_id']:
                 try:
+                    print(f"[view_message_handler] Attempting to copy message {msg['telegram_message_id']}")
                     await context.bot.copy_message(
                         chat_id=chat_id,
                         from_chat_id=chat_id,
                         message_id=msg['telegram_message_id']
                     )
                     sent = True
+                    print(f"[view_message_handler] Successfully copied message")
                 except Exception as e:
-                    print(f"Failed to copy message {msg['telegram_message_id']}: {e}")
+                    print(f"[view_message_handler] Failed to copy message {msg['telegram_message_id']}: {e}")
             
             # Fallback: If copy failed or no telegram_message_id, try sending media by file_id
             if not sent and msg['media_file_id']:
                 try:
+                    print(f"[view_message_handler] Attempting to send media by file_id: {msg['media_file_id']}")
                     caption = msg['text'] or None
                     if msg['media_type'] == 'photo':
                         await context.bot.send_photo(chat_id=chat_id, photo=msg['media_file_id'], caption=caption)
+                        print(f"[view_message_handler] Sent photo")
                     elif msg['media_type'] == 'video':
                         await context.bot.send_video(chat_id=chat_id, video=msg['media_file_id'], caption=caption)
+                        print(f"[view_message_handler] Sent video")
                     elif msg['media_type'] == 'document':
                         await context.bot.send_document(chat_id=chat_id, document=msg['media_file_id'], caption=caption)
+                        print(f"[view_message_handler] Sent document")
                     elif msg['media_type'] == 'audio':
                         await context.bot.send_audio(chat_id=chat_id, audio=msg['media_file_id'], caption=caption)
+                        print(f"[view_message_handler] Sent audio")
                     elif msg['media_type'] == 'voice':
                         await context.bot.send_voice(chat_id=chat_id, voice=msg['media_file_id'], caption=caption)
+                        print(f"[view_message_handler] Sent voice")
+                    sent = True
                 except Exception as e:
-                    print(f"Failed to send media file_id {msg['media_file_id']}: {e}")
+                    print(f"[view_message_handler] Failed to send media file_id {msg['media_file_id']}: {e}")
+            
+            if not sent and msg['media_type'] != 'text':
+                print(f"[view_message_handler] WARNING: Could not send media for message {db_id}")
         
         # Send card without parse_mode to avoid markdown errors with user content
         await update.message.reply_text(text, reply_markup=markup)
@@ -878,9 +916,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif time_type == "cust":
             prompt = (
                 f"✍️ **Custom Reminder**\n"
-                f"Please reply directly to this message with your reminder time.\n"
-                f"Examples: 'in 45m', 'tomorrow 3pm', 'june 1st 10am'\n\n"
-                f"(Message ID: {db_id})"  # Use parentheses instead of brackets
+                f"Please reply directly to this message with your reminder time.\n\n"
+                f"**Examples:**\n"
+                f"• 'in 45m' or 'in 2 hours'\n"
+                f"• 'in 2 weeks' or 'in 3 months'\n"
+                f"• 'tomorrow 3pm' or 'next friday 9am'\n"
+                f"• 'june 15th 2pm'\n\n"
+                f"(Message ID: {db_id})"
             )
             await context.bot.send_message(
                 chat_id=chat_id,
