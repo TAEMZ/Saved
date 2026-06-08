@@ -100,9 +100,34 @@ def init_db():
                 created_at TEXT NOT NULL,
                 reminder_time TEXT,
                 is_reminded INTEGER DEFAULT 0,
-                is_archived INTEGER DEFAULT 0
+                is_archived INTEGER DEFAULT 0,
+                recurring_type TEXT DEFAULT NULL  -- 'daily', 'weekly', 'monthly', 'yearly'
             )
         ''')
+        
+        # Add recurring_type column if it doesn't exist (for existing databases)
+        has_recurring = False
+        if IS_POSTGRES:
+            cursor.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = 'saved_messages' AND column_name = 'recurring_type'"
+            )
+            has_recurring = bool(cursor.fetchone())
+        else:
+            cursor.execute("PRAGMA table_info(saved_messages)")
+            for col in cursor.fetchall():
+                try:
+                    col_name = col['name']
+                except (TypeError, KeyError, IndexError):
+                    col_name = col[1]
+                if col_name == 'recurring_type':
+                    has_recurring = True
+                    break
+
+        if not has_recurring:
+            try:
+                cursor.execute('ALTER TABLE saved_messages ADD COLUMN recurring_type TEXT DEFAULT NULL')
+            except Exception:
+                pass
         
         # Create tags table
         cursor.execute('''
@@ -186,6 +211,8 @@ def init_db():
         # Indexes for fast lookup
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_id ON saved_messages(chat_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_reminder ON saved_messages(reminder_time, is_reminded)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_archived ON saved_messages(is_archived)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_archived ON saved_messages(chat_id, is_archived)')
         
         conn.commit()
 
@@ -259,11 +286,26 @@ def clear_sync_state(chat_id):
 
 def add_saved_message(chat_id, text, media_type, media_file_id=None, telegram_message_id=None):
     """Saves a new message in the database. Returns the local database id. Encrypts text content."""
+    import hashlib
     created_at = datetime.utcnow().isoformat()
     encrypted_text = encryption.encrypt_text(text)
     
+    # Deduplication: Check if identical message already exists for this user
+    text_hash = hashlib.sha256(encrypted_text.encode()).hexdigest()
+    
     with get_connection() as conn:
         cursor = conn.cursor()
+        # Check for duplicates (same encrypted text, same chat_id)
+        cursor.execute('''
+            SELECT id FROM saved_messages 
+            WHERE chat_id = ? AND text = ?
+        ''', (chat_id, encrypted_text))
+        existing = cursor.fetchone()
+        
+        if existing:
+            return existing['id']  # Return existing ID instead of creating duplicate
+        
+        # Insert new message
         cursor.execute('''
             INSERT INTO saved_messages (chat_id, telegram_message_id, text, media_type, media_file_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -271,16 +313,16 @@ def add_saved_message(chat_id, text, media_type, media_file_id=None, telegram_me
         conn.commit()
         return cursor.lastrowid
 
-def set_reminder(message_id, reminder_time_dt):
+def set_reminder(message_id, reminder_time_dt, recurring_type=None):
     """Sets a reminder time (datetime object) for a specific message ID."""
     reminder_time_str = reminder_time_dt.isoformat()
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE saved_messages
-            SET reminder_time = ?, is_reminded = 0
+            SET reminder_time = ?, is_reminded = 0, recurring_type = ?
             WHERE id = ?
-        ''', (reminder_time_str, message_id))
+        ''', (reminder_time_str, recurring_type, message_id))
         conn.commit()
 
 def add_tag(message_id, tag_name):
@@ -313,6 +355,24 @@ def get_active_messages(chat_id, limit=50):
         cursor.execute('''
             SELECT * FROM saved_messages
             WHERE chat_id = ? AND is_archived = 0
+            ORDER BY created_at DESC
+            LIMIT ?
+        ''', (chat_id, limit))
+        
+        results = []
+        for row in cursor.fetchall():
+            d = dict(row)
+            d['text'] = encryption.decrypt_text(d['text'])
+            results.append(d)
+        return results
+
+def get_archived_messages(chat_id, limit=50):
+    """Returns list of archived messages for a user, decrypting their text content."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM saved_messages
+            WHERE chat_id = ? AND is_archived = 1
             ORDER BY created_at DESC
             LIMIT ?
         ''', (chat_id, limit))
@@ -370,14 +430,58 @@ def get_due_reminders():
         for row in cursor.fetchall():
             d = dict(row)
             d['text'] = encryption.decrypt_text(d['text'])
+            # Handle recurring reminders - set next reminder time
+            recurring = d.get('recurring_type')
+            if recurring and d['reminder_time']:
+                # Update next reminder based on recurring type
+                from datetime import timedelta
+                reminder_dt = datetime.fromisoformat(d['reminder_time'])
+                if recurring == 'daily':
+                    d['next_reminder_time'] = (reminder_dt + timedelta(days=1)).isoformat()
+                elif recurring == 'weekly':
+                    d['next_reminder_time'] = (reminder_dt + timedelta(weeks=1)).isoformat()
+                elif recurring == 'monthly':
+                    # Approximate: add 30 days
+                    d['next_reminder_time'] = (reminder_dt + timedelta(days=30)).isoformat()
+                elif recurring == 'yearly':
+                    # Approximate: add 365 days
+                    d['next_reminder_time'] = (reminder_dt + timedelta(days=365)).isoformat()
             results.append(d)
         return results
 
-def mark_as_reminded(message_id):
-    """Marks a message as reminded."""
+def update_next_reminder(message_id, next_time_str):
+    """Updates the reminder_time for recurring messages."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('UPDATE saved_messages SET is_reminded = 1 WHERE id = ?', (message_id,))
+        cursor.execute('''
+            UPDATE saved_messages
+            SET reminder_time = ?, is_reminded = 0
+            WHERE id = ?
+        ''', (next_time_str, message_id))
+        conn.commit()
+
+def mark_as_reminded(message_id):
+    """Marks a message as reminded. For recurring reminders, schedules next one."""
+    msg = get_message_details(message_id)
+    
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        if msg and msg.get('recurring_type'):
+            # It's a recurring reminder - schedule next one
+            next_time_str = msg.get('next_reminder_time')
+            if next_time_str:
+                cursor.execute('''
+                    UPDATE saved_messages
+                    SET reminder_time = ?, is_reminded = 0
+                    WHERE id = ?
+                ''', (next_time_str, message_id))
+            else:
+                # No next time set, mark as complete
+                cursor.execute('UPDATE saved_messages SET is_reminded = 1 WHERE id = ?', (message_id,))
+        else:
+            # One-time reminder - mark as complete
+            cursor.execute('UPDATE saved_messages SET is_reminded = 1 WHERE id = ?', (message_id,))
         conn.commit()
 
 def mark_as_archived(message_id):
@@ -409,8 +513,9 @@ def delete_message(message_id):
 
 def search_messages(chat_id, query_str, limit=50):
     """Performs a text search in memory to support searching encrypted content."""
-    # Fetch all active messages (up to a large limit)
-    messages = get_active_messages(chat_id, limit=1000)
+    # Fetch active messages with a limit for efficiency
+    # Only fetch messages with some text content to reduce DB load
+    messages = get_active_messages(chat_id, limit=500)
     
     query_lower = query_str.lower().strip()
     results = []

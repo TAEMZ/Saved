@@ -125,13 +125,17 @@ def parse_relative_time_for_user(text, user_timezone_str):
         return parsed.replace(tzinfo=None)
     return None
 
-def make_card_markup(db_id, has_reminder=False):
+def make_card_markup(db_id, has_reminder=False, has_recurring=False):
     """Generates the inline keyboard for a saved message card."""
     keyboard = [
         [
             InlineKeyboardButton("🕒 1 Hour", callback_data=f"rem:1h:{db_id}"),
             InlineKeyboardButton("🕒 3 Hours", callback_data=f"rem:3h:{db_id}"),
             InlineKeyboardButton("🕒 Tomorrow", callback_data=f"rem:tom:{db_id}"),
+        ],
+        [
+            InlineKeyboardButton("✅ Daily (Next Day)", callback_data=f"rem:daily:{db_id}"),
+            InlineKeyboardButton("✅ Weekly (Next Week)", callback_data=f"rem:weekly:{db_id}"),
         ],
         [
             InlineKeyboardButton("✍️ Custom Time", callback_data=f"rem:cust:{db_id}"),
@@ -264,27 +268,105 @@ def clean_session_files(chat_id):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Greets the user and displays instructions."""
     print(f"[start_command] HANDLER CALLED for user {update.message.from_user.id}")
-    text = (
-        "👋 **Welcome to the Saved Messages Organizer Bot!**\n\n"
-        "I'll help you organize and set reminders for messages, articles, links, or files so you never forget them.\n\n"
-        "🚀 **How to use:**\n"
-        "1. **Forward** any message, link, image, or text to this chat. I will encrypt it securely so no one else can read it!\n"
-        "2. Choose a **reminder time** and add **tags** using the buttons.\n"
-        "3. When the time comes, I'll send the message back to you!\n\n"
-        "📥 **Sync Your Official History:**\n"
-        "• Type `/sync` to temporarily connect your account and import your existing Telegram **Saved Messages** history.\n\n"
-        "⚙️ **Commands:**\n"
-        "• /list — View your active saved messages\n"
-        "• /tags — View all active tags and filter by them\n"
-        "• /search <query> — Search messages and tags\n"
-        "• /timezone <name> — Set your timezone (e.g. `/timezone Europe/Paris`)\n"
-        "• /help — Show this help text again"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    user_id = update.message.from_user.id
+    
+    # Check if this is first time user
+    first_time = database.get_user_timezone(user_id) == 'UTC' and not database.get_active_messages(user_id)
+    
+    if first_time:
+        # First-time onboarding with keyboard shortcuts
+        keyboard = [
+            ["📝 Save Message", "📋 My Messages"],
+            ["🔍 Search", "🏷️ My Tags"],
+            ["⚙️ Settings", "💡 Tips"]
+        ]
+        
+        text = (
+            "👋 **Welcome to the Saved Messages Organizer Bot!**\n\n"
+            "I'm here to help you organize and remember things. Here's how to get started:\n\n"
+            "✨ **Quick Start:**\n"
+            "1. **Forward any message** to me (text, link, photo, video, etc.)\n"
+            "2. I'll save it with encryption so no one else can read it\n"
+            "3. Choose a **reminder time** using the buttons\n"
+            "4. Add **tags** to organize your saved items\n\n"
+            "⚙️ **Quick Actions:**\n"
+            "Tap buttons below or use commands:\n"
+            "• `/list` — View your saved messages\n"
+            "• `/search <query>` — Find something specific\n"
+            "• `/export` — Download your data as JSON\n\n"
+            "🔒 **Privacy:** All your messages are encrypted and private to you!"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    else:
+        # Regular welcome for returning users
+        text = (
+            "👋 **Welcome back!**\n\n"
+            "I'll help you organize and set reminders for messages, articles, links, or files so you never forget them.\n\n"
+            "🚀 **How to use:**\n"
+            "1. **Forward** any message, link, image, or text to this chat. I will encrypt it securely so no one else can read it!\n"
+            "2. Choose a **reminder time** and add **tags** using the buttons.\n"
+            "3. When the time comes, I'll send the message back to you!\n\n"
+            "⚙️ **Commands:**\n"
+            "• /list — View your active saved messages\n"
+            "• /tags — View all active tags and filter by them\n"
+            "• /search <query> — Search messages and tags\n"
+            "• /export — Export your messages as JSON\n"
+            "• /archived — View your archived messages\n"
+            "• /timezone <name> — Set your timezone\n"
+            "• /help — Show this help text again"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays user manual."""
     await start_command(update, context)
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Exports user's saved messages as JSON file."""
+    chat_id = update.effective_chat.id
+    loading_msg = await update.message.reply_text("📦 Exporting your saved messages...")
+    
+    messages = database.get_active_messages(chat_id)
+    
+    # Format for export
+    export_data = []
+    for msg in messages:
+        tags = database.get_message_tags(msg['id'])
+        export_data.append({
+            "id": msg['id'],
+            "text": msg['text'],
+            "media_type": msg['media_type'],
+            "created_at": msg['created_at'],
+            "tags": tags,
+            "has_reminder": bool(msg['reminder_time']),
+            "is_archived": bool(msg['is_archived'])
+        })
+    
+    import json
+    export_json = json.dumps(export_data, indent=2, ensure_ascii=False)
+    
+    # Save to temporary file
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        f.write(export_json)
+        temp_path = f.name
+    
+    # Send as document
+    try:
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=open(temp_path, 'rb'),
+            caption=f"📦 **Export Complete!**\n\n"
+                    f"Exported `{len(messages)}` messages.\n"
+                    f"File contains all your saved messages including text, tags, and reminder info.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Export failed: `{str(e)}`")
+    finally:
+        import os
+        os.unlink(temp_path)
+        await loading_msg.delete()
 
 async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sets user's local timezone for reminder time parsing."""
@@ -378,6 +460,33 @@ async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Remove parse_mode to avoid issues with user-generated tag names
     await update.message.reply_text(text)
 
+async def archived_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists archived saved items."""
+    chat_id = update.effective_chat.id
+    loading_msg = await update.message.reply_text("📂 Loading your archived messages...")
+    messages = database.get_archived_messages(chat_id)
+    if not messages:
+        await loading_msg.edit_text("📁 You have no archived messages.")
+        return
+        
+    text = "📁 **Your Archived Messages:**\n\n"
+    for i, msg in enumerate(messages, 1):
+        snippet = msg['text'] or "(No text content)"
+        if len(snippet) > 50:
+            snippet = snippet[:47] + "..."
+        snippet = snippet.replace('\n', ' ')
+        
+        if msg['media_type'] != 'text':
+            snippet = f"[{msg['media_type'].capitalize()}] {snippet}".strip()
+            
+        tags = database.get_message_tags(msg['id'])
+        tag_str = " " + " ".join([f"#{t}" for t in tags]) if tags else ""
+        
+        text += f"{i}. {snippet}{tag_str}\n"
+        text += f"   🔍 /view{msg['id']}  |  🗑️ /delete{msg['id']}\n\n"
+        
+    await loading_msg.edit_text(text)
+
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Searches messages and tags."""
     chat_id = update.effective_chat.id
@@ -388,7 +497,22 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     results = database.search_messages(chat_id, query)
     if not results:
-        await update.message.reply_text(f"🔍 No messages found matching '{query}'.")
+        # Smart suggestion: Show popular tags
+        all_tags = database.get_all_tags(chat_id)
+        suggestions = []
+        if all_tags:
+            # Find tags similar to query
+            for tag in all_tags[:5]:
+                if query.lower() in tag.lower():
+                    suggestions.append(f"#{tag}")
+        
+        suggestion_text = ""
+        if suggestions:
+            suggestion_text = f"\n\n💡 **Did you mean?**\nTry searching:\n• " + "\n• ".join(suggestions)
+        elif all_tags:
+            suggestion_text = f"\n\n💡 **Popular tags:**\n" + " ".join([f"#{t}" for t in all_tags[:5]])
+        
+        await update.message.reply_text(f"🔍 No messages found matching '{query}'.{suggestion_text}")
         return
         
     text = f"🔍 Search Results for '{query}':\n\n"
@@ -549,6 +673,15 @@ async def archive_message_handler(update: Update, context: ContextTypes.DEFAULT_
     db_id = int(match.group(1))
     database.mark_as_archived(db_id)
     await update.message.reply_text(f"📁 Message ID {db_id} archived successfully.")
+
+async def delete_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick deletes a message from a command link."""
+    match = re.match(r"^/delete(\d+)(?:@\w+)?$", update.message.text)
+    if not match:
+        return
+    db_id = int(match.group(1))
+    database.delete_message(db_id)
+    await update.message.reply_text(f"🗑️ Message ID {db_id} deleted permanently.")
 
 async def tag_filter_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists saved messages matching the chosen tag."""
@@ -1023,6 +1156,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         time_type = parts[1]
         now_utc = datetime.utcnow()
         reminder_time = None
+        recurring_type = None
         
         if time_type == "1h":
             reminder_time = now_utc + timedelta(hours=1)
@@ -1030,6 +1164,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reminder_time = now_utc + timedelta(hours=3)
         elif time_type == "tom":
             reminder_time = get_tomorrow_morning_in_utc(tz)
+        elif time_type == "daily":
+            reminder_time = now_utc + timedelta(hours=1)  # Start after 1 hour
+            recurring_type = "daily"
+        elif time_type == "weekly":
+            reminder_time = now_utc + timedelta(hours=1)  # Start after 1 hour
+            recurring_type = "weekly"
+        elif time_type == "tomorrow_daily":
+            reminder_time = get_tomorrow_morning_in_utc(tz)
+            recurring_type = "daily"
+        elif time_type == "tomorrow_weekly":
+            reminder_time = get_tomorrow_morning_in_utc(tz)
+            recurring_type = "weekly"
         elif time_type == "cust":
             prompt = (
                 f"✍️ **Custom Reminder**\n"
@@ -1050,7 +1196,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         if reminder_time:
-            database.set_reminder(db_id, reminder_time)
+            database.set_reminder(db_id, reminder_time, recurring_type=recurring_type)
             card_text, markup = get_card_content(db_id, tz)
             await query.edit_message_text(text=card_text, reply_markup=markup)
             
@@ -1103,6 +1249,7 @@ def get_bot_app():
     app.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r"^/view(\d+)(?:@\w+)?$"), view_message_handler))
     app.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r"^/archive(\d+)(?:@\w+)?$"), archive_message_handler))
     app.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r"^/tag_([a-zA-Z0-9_]+)(?:@\w+)?$"), tag_filter_handler))
+    app.add_handler(MessageHandler(filters.COMMAND & filters.Regex(r"^/delete(\d+)(?:@\w+)?$"), delete_message_handler))
     # Command handlers
     print(f"[get_bot_app] Adding CommandHandler 'start'")
     app.add_handler(CommandHandler("start", start_command))
@@ -1110,6 +1257,8 @@ def get_bot_app():
     app.add_handler(CommandHandler("list", list_command))
     app.add_handler(CommandHandler("tags", tags_command))
     app.add_handler(CommandHandler("search", search_command))
+    app.add_handler(CommandHandler("export", export_command))
+    app.add_handler(CommandHandler("archived", archived_command))
     app.add_handler(CommandHandler("timezone", timezone_command))
     app.add_handler(CommandHandler("sync", sync_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
