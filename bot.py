@@ -437,7 +437,16 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "📥 **Sync Official Saved Messages History**\n\n"
-        "To sync your history, we will temporarily log in to your account, download recent messages, and immediately log out.\n\n"
+        "I will temporarily log in to your account, import your saved messages, and immediately log out.\n\n"
+        "**What gets uploaded:**\n"
+        "✅ Photos (all sizes)\n"
+        "✅ Small documents (under 10MB)\n"
+        "✅ Voice messages\n"
+        "✅ All text and links\n\n"
+        "**What gets skipped:**\n"
+        "⏭️ Videos (saved as text/link only)\n"
+        "⏭️ Large files (over 10MB)\n"
+        "⏭️ Audio/music files\n\n"
         "Click the button below to **Share Phone Number** to begin. You can type `/cancel` at any time to abort.",
         reply_markup=keyboard,
         parse_mode="Markdown"
@@ -736,14 +745,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 count = 0
                 media_count = 0
+                skipped_count = 0
                 batch_size = 50  # Process in batches to show progress
+                MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB limit
                 
                 # Download ALL Saved Messages (no limit)
                 async for msg in client.iter_messages('me'):
                     # Update progress every 10 messages
                     if count % 10 == 0:
                         try:
-                            await progress_msg.edit_text(f"📥 Importing your Saved Messages...\n\nProcessed: {count} messages\n📎 Media files: {media_count}")
+                            await progress_msg.edit_text(
+                                f"📥 Importing your Saved Messages...\n\n"
+                                f"Processed: {count} messages\n"
+                                f"📎 Media: {media_count} | ⏭️ Skipped: {skipped_count}"
+                            )
                         except Exception:
                             pass  # Ignore if message editing fails
                     
@@ -754,64 +769,77 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     media_type = 'text'
                     media_file_id = None
                     
-                    # Download media and re-upload through bot API to get file_id
+                    # Photos: Always upload (usually small)
                     if msg.photo:
                         media_type = 'photo'
                         try:
                             # Download photo to memory
                             file_bytes = await client.download_media(msg.media, file=bytes)
-                            # Re-upload through bot to get file_id
-                            sent = await context.bot.send_photo(chat_id=chat_id, photo=file_bytes, caption=text[:1024] if text else None)
-                            media_file_id = sent.photo[-1].file_id
-                            # Delete the message we just sent (it was just to get file_id)
-                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
-                            media_count += 1
+                            
+                            # Check size
+                            if len(file_bytes) > MAX_FILE_SIZE:
+                                print(f"Skipping large photo: {len(file_bytes)} bytes")
+                                skipped_count += 1
+                            else:
+                                # Re-upload through bot to get file_id
+                                sent = await context.bot.send_photo(chat_id=chat_id, photo=file_bytes, caption=text[:1024] if text else None)
+                                media_file_id = sent.photo[-1].file_id
+                                # Delete the message we just sent (it was just to get file_id)
+                                await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                                media_count += 1
                         except Exception as e:
                             print(f"Failed to process photo during sync: {e}")
-                            
+                            skipped_count += 1
+                    
+                    # Videos: Skip upload, just save text/link
                     elif msg.video:
                         media_type = 'video'
-                        try:
-                            file_bytes = await client.download_media(msg.media, file=bytes)
-                            sent = await context.bot.send_video(chat_id=chat_id, video=file_bytes, caption=text[:1024] if text else None)
-                            media_file_id = sent.video.file_id
-                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
-                            media_count += 1
-                        except Exception as e:
-                            print(f"Failed to process video during sync: {e}")
-                            
+                        print(f"Skipping video upload (too large), saving text only")
+                        skipped_count += 1
+                        # Don't upload, just save as text with media_type marker
+                        
+                    # Documents: Only upload if small (< 10MB)
                     elif msg.document:
                         media_type = 'document'
                         try:
-                            file_bytes = await client.download_media(msg.media, file=bytes)
-                            sent = await context.bot.send_document(chat_id=chat_id, document=file_bytes, caption=text[:1024] if text else None)
-                            media_file_id = sent.document.file_id
-                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
-                            media_count += 1
+                            # Check file size first without downloading
+                            file_size = msg.document.size if hasattr(msg.document, 'size') else 0
+                            
+                            if file_size > MAX_FILE_SIZE:
+                                print(f"Skipping large document: {file_size} bytes")
+                                skipped_count += 1
+                            else:
+                                file_bytes = await client.download_media(msg.media, file=bytes)
+                                sent = await context.bot.send_document(chat_id=chat_id, document=file_bytes, caption=text[:1024] if text else None)
+                                media_file_id = sent.document.file_id
+                                await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                                media_count += 1
                         except Exception as e:
                             print(f"Failed to process document during sync: {e}")
-                            
+                            skipped_count += 1
+                    
+                    # Voice: Upload (usually small)
                     elif msg.voice:
                         media_type = 'voice'
                         try:
                             file_bytes = await client.download_media(msg.media, file=bytes)
-                            sent = await context.bot.send_voice(chat_id=chat_id, voice=file_bytes)
-                            media_file_id = sent.voice.file_id
-                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
-                            media_count += 1
+                            
+                            if len(file_bytes) > MAX_FILE_SIZE:
+                                skipped_count += 1
+                            else:
+                                sent = await context.bot.send_voice(chat_id=chat_id, voice=file_bytes)
+                                media_file_id = sent.voice.file_id
+                                await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                                media_count += 1
                         except Exception as e:
                             print(f"Failed to process voice during sync: {e}")
-                            
+                            skipped_count += 1
+                    
+                    # Audio: Skip (usually large music files)
                     elif msg.audio:
                         media_type = 'audio'
-                        try:
-                            file_bytes = await client.download_media(msg.media, file=bytes)
-                            sent = await context.bot.send_audio(chat_id=chat_id, audio=file_bytes, caption=text[:1024] if text else None)
-                            media_file_id = sent.audio.file_id
-                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
-                            media_count += 1
-                        except Exception as e:
-                            print(f"Failed to process audio during sync: {e}")
+                        print(f"Skipping audio upload (potentially large), saving text only")
+                        skipped_count += 1
                         
                     # Skip empty messages with no content
                     if not text and media_type == 'text':
@@ -845,7 +873,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text(
                     f"✅ **Sync Finished!**\n\n"
                     f"Imported `{count}` messages from your Saved Messages.\n"
-                    f"📎 Processed `{media_count}` media files.\n\n"
+                    f"📎 Uploaded `{media_count}` media files (photos, small docs).\n"
+                    f"⏭️ Skipped `{skipped_count}` large files (videos, large docs).\n\n"
                     f"• Run /list to view and organize them.\n"
                     f"• All temporary login sessions have been deleted.",
                     parse_mode="Markdown"
