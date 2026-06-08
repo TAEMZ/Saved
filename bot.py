@@ -304,6 +304,12 @@ async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_user_timezone(chat_id, tz_input)
     await update.message.reply_text(f"✅ Your timezone has been updated to: `{tz_input}`", parse_mode="Markdown")
 
+def escape_markdown_v2(text):
+    """Escape special characters for Telegram MarkdownV2."""
+    # Characters that need escaping in MarkdownV2
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
+
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists unarchived saved items with links to view them."""
     chat_id = update.effective_chat.id
@@ -312,8 +318,9 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not messages:
         await loading_msg.edit_text("📂 You have no active saved messages.")
         return
-        
-    text = "📂 **Your Active Saved Messages:**\n\n"
+    
+    # Build response without markdown to avoid parsing issues with user content
+    text = "📂 Your Active Saved Messages:\n\n"
     for i, msg in enumerate(messages, 1):
         snippet = msg['text'] or "(No text content)"
         if len(snippet) > 50:
@@ -328,8 +335,9 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         text += f"{i}. {snippet}{tag_str}\n"
         text += f"   🔍 /view{msg['id']}  |  📁 /archive{msg['id']}\n\n"
-        
-    await loading_msg.edit_text(text, parse_mode="Markdown")
+    
+    # Send without parse_mode to avoid markdown parsing errors with user content
+    await loading_msg.edit_text(text)
 
 async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists all tags and provides commands to filter by them."""
@@ -339,17 +347,18 @@ async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🏷️ You don't have any tags yet. Tag messages by clicking 'Add Tag' or including hashtags (e.g. #read) in your messages.")
         return
         
-    text = "🏷️ **Your Tags:**\n\n"
+    text = "🏷️ Your Tags:\n\n"
     for tag in tags:
         text += f"• #{tag} — Filter: /tag_{tag}\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
+    # Remove parse_mode to avoid issues with user-generated tag names
+    await update.message.reply_text(text)
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Searches messages and tags."""
     chat_id = update.effective_chat.id
     query = " ".join(context.args).strip()
     if not query:
-        await update.message.reply_text("Usage: `/search <keyword or tag>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: /search <keyword or tag>")
         return
         
     results = database.search_messages(chat_id, query)
@@ -357,7 +366,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔍 No messages found matching '{query}'.")
         return
         
-    text = f"🔍 **Search Results for '{query}':**\n\n"
+    text = f"🔍 Search Results for '{query}':\n\n"
     for i, msg in enumerate(results, 1):
         snippet = msg['text'] or "(No text content)"
         if len(snippet) > 50:
@@ -372,8 +381,9 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         text += f"{i}. {snippet}{tag_str}\n"
         text += f"   🔍 /view{msg['id']}  |  📁 /archive{msg['id']}\n\n"
-        
-    await update.message.reply_text(text, parse_mode="Markdown")
+    
+    # Remove parse_mode to avoid markdown parsing errors
+    await update.message.reply_text(text)
 
 # --- On-Demand History Sync (/sync) Handlers ---
 
@@ -476,7 +486,7 @@ async def tag_filter_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"🏷️ No active messages found with tag #{tag_name}.")
         return
         
-    text = f"🏷️ **Active messages with tag #{tag_name}:**\n\n"
+    text = f"🏷️ Active messages with tag #{tag_name}:\n\n"
     for i, msg in enumerate(messages, 1):
         snippet = msg['text'] or "(No text content)"
         if len(snippet) > 50:
@@ -488,8 +498,9 @@ async def tag_filter_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
         text += f"{i}. {snippet}\n"
         text += f"   🔍 /view{msg['id']}  |  📁 /archive{msg['id']}\n\n"
-        
-    await update.message.reply_text(text, parse_mode="Markdown")
+    
+    # Remove parse_mode to avoid markdown parsing errors
+    await update.message.reply_text(text)
 
 # --- Message and Reply Parsing ---
 
