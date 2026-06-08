@@ -520,6 +520,12 @@ async def view_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             
             if not sent and msg['media_type'] != 'text':
                 print(f"[view_message_handler] WARNING: Could not send media for message {db_id}")
+                # Inform user that media cannot be displayed
+                await update.message.reply_text(
+                    f"⚠️ Media file cannot be displayed.\n\n"
+                    f"This usually happens with messages imported via /sync. "
+                    f"The text content is shown in the card above."
+                )
         
         # Send card without parse_mode to avoid markdown errors with user content
         await update.message.reply_text(text, reply_markup=markup)
@@ -726,37 +732,97 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         return
                 
                 # --- Successful Login! Run Sync Import ---
-                await message.reply_text("📥 Login Successful! Importing your Saved Messages... this might take a few moments...")
+                progress_msg = await message.reply_text("📥 Login Successful! Importing your Saved Messages...\n\nFetching messages: 0")
                 
                 count = 0
-                # Download last 100 Saved Messages
-                async for msg in client.iter_messages('me', limit=100):
+                media_count = 0
+                batch_size = 50  # Process in batches to show progress
+                
+                # Download ALL Saved Messages (no limit)
+                async for msg in client.iter_messages('me'):
+                    # Update progress every 10 messages
+                    if count % 10 == 0:
+                        try:
+                            await progress_msg.edit_text(f"📥 Importing your Saved Messages...\n\nProcessed: {count} messages\n📎 Media files: {media_count}")
+                        except Exception:
+                            pass  # Ignore if message editing fails
+                    
                     # We only import text messages, captions, or descriptions
                     text = msg.text or msg.message or ""
                     
-                    # Deduce media type
+                    # Deduce media type and get media file if present
                     media_type = 'text'
+                    media_file_id = None
+                    
+                    # Download media and re-upload through bot API to get file_id
                     if msg.photo:
                         media_type = 'photo'
+                        try:
+                            # Download photo to memory
+                            file_bytes = await client.download_media(msg.media, file=bytes)
+                            # Re-upload through bot to get file_id
+                            sent = await context.bot.send_photo(chat_id=chat_id, photo=file_bytes, caption=text[:1024] if text else None)
+                            media_file_id = sent.photo[-1].file_id
+                            # Delete the message we just sent (it was just to get file_id)
+                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                            media_count += 1
+                        except Exception as e:
+                            print(f"Failed to process photo during sync: {e}")
+                            
                     elif msg.video:
                         media_type = 'video'
+                        try:
+                            file_bytes = await client.download_media(msg.media, file=bytes)
+                            sent = await context.bot.send_video(chat_id=chat_id, video=file_bytes, caption=text[:1024] if text else None)
+                            media_file_id = sent.video.file_id
+                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                            media_count += 1
+                        except Exception as e:
+                            print(f"Failed to process video during sync: {e}")
+                            
                     elif msg.document:
                         media_type = 'document'
+                        try:
+                            file_bytes = await client.download_media(msg.media, file=bytes)
+                            sent = await context.bot.send_document(chat_id=chat_id, document=file_bytes, caption=text[:1024] if text else None)
+                            media_file_id = sent.document.file_id
+                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                            media_count += 1
+                        except Exception as e:
+                            print(f"Failed to process document during sync: {e}")
+                            
                     elif msg.voice:
                         media_type = 'voice'
+                        try:
+                            file_bytes = await client.download_media(msg.media, file=bytes)
+                            sent = await context.bot.send_voice(chat_id=chat_id, voice=file_bytes)
+                            media_file_id = sent.voice.file_id
+                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                            media_count += 1
+                        except Exception as e:
+                            print(f"Failed to process voice during sync: {e}")
+                            
                     elif msg.audio:
                         media_type = 'audio'
+                        try:
+                            file_bytes = await client.download_media(msg.media, file=bytes)
+                            sent = await context.bot.send_audio(chat_id=chat_id, audio=file_bytes, caption=text[:1024] if text else None)
+                            media_file_id = sent.audio.file_id
+                            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                            media_count += 1
+                        except Exception as e:
+                            print(f"Failed to process audio during sync: {e}")
                         
                     # Skip empty messages with no content
                     if not text and media_type == 'text':
                         continue
                         
-                    # Write to database directly
+                    # Write to database with media_file_id if we got one
                     db_id = database.add_saved_message(
                         chat_id=chat_id,
                         text=text,
                         media_type=media_type,
-                        media_file_id=None,
+                        media_file_id=media_file_id,
                         telegram_message_id=None
                     )
                     
@@ -778,7 +844,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await message.reply_text(
                     f"✅ **Sync Finished!**\n\n"
-                    f"Imported `{count}` messages from your Saved Messages.\n\n"
+                    f"Imported `{count}` messages from your Saved Messages.\n"
+                    f"📎 Processed `{media_count}` media files.\n\n"
                     f"• Run /list to view and organize them.\n"
                     f"• All temporary login sessions have been deleted.",
                     parse_mode="Markdown"
