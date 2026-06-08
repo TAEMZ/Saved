@@ -746,13 +746,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 count = 0
                 media_count = 0
                 skipped_count = 0
-                batch_size = 50  # Process in batches to show progress
                 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB limit
                 
                 # Download ALL Saved Messages (no limit)
                 async for msg in client.iter_messages('me'):
-                    # Update progress every 10 messages
-                    if count % 10 == 0:
+                    # Update progress every 50 messages (not too spammy)
+                    if count > 0 and count % 50 == 0:
                         try:
                             await progress_msg.edit_text(
                                 f"📥 Importing your Saved Messages...\n\n"
